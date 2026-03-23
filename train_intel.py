@@ -1,18 +1,13 @@
 """
-Training Script for ViT Hashing
-===============================
+Training Script for ViT Hashing (GPU Optimized)
+================================================
 Training Vision Transformer Hashing với PyTorch.
-
-Hỗ trợ:
-    - CPU/CUDA training
-    - Mixed precision (AMP) cho CUDA
-    - Standard PyTorch CPU optimizations
+Tối ưu cho GPU với VRAM hạn chế (4GB+).
 
 Usage:
-    python train_intel.py                    # Auto detect device
+    python train_intel.py                    # GPU với AMP
+    python train_intel.py --batch-size 4     # Giảm batch nếu OOM
     python train_intel.py --device cpu       # Force CPU
-    python train_intel.py --device cuda      # Force CUDA
-    python train_intel.py --amp              # Enable AMP (CUDA only)
     python train_intel.py --quick            # Quick test mode
 """
 
@@ -30,6 +25,7 @@ from torch.utils.data import DataLoader
 import torchvision
 import torchvision.transforms as transforms
 import numpy as np
+import gc
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +36,30 @@ from src.loss import CSQLoss
 # ============================================================
 # DEVICE SETUP
 # ============================================================
+
+def clear_memory():
+    """Giải phóng VRAM."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def setup_gpu() -> Dict[str, Any]:
+    """
+    Setup GPU với các tối ưu hóa.
+    """
+    info = {
+        'device': 'cuda',
+        'name': torch.cuda.get_device_name(0),
+        'vram_total': torch.cuda.get_device_properties(0).total_memory / 1024**3
+    }
+    
+    # Optimize GPU settings
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    
+    return info
+
 
 def setup_cpu_optimizations() -> Dict[str, Any]:
     """
@@ -67,25 +87,17 @@ def setup_cpu_optimizations() -> Dict[str, Any]:
 
 def get_device(preferred: str = 'auto') -> Tuple[torch.device, Dict]:
     """
-    Lấy device.
-    
-    Args:
-        preferred: 'auto', 'cpu', 'cuda'
-    
-    Returns:
-        device, info_dict
+    Lấy device (ưu tiên GPU).
     """
-    if preferred == 'auto':
+    if preferred == 'auto' or preferred == 'cuda':
         if torch.cuda.is_available():
-            return torch.device('cuda'), {'device': 'cuda', 'name': torch.cuda.get_device_name(0)}
-        else:
-            info = setup_cpu_optimizations()
-            return torch.device('cpu'), info
-    elif preferred == 'cuda' and torch.cuda.is_available():
-        return torch.device('cuda'), {'device': 'cuda', 'name': torch.cuda.get_device_name(0)}
-    else:
-        info = setup_cpu_optimizations()
-        return torch.device('cpu'), info
+            info = setup_gpu()
+            return torch.device('cuda'), info
+        elif preferred == 'cuda':
+            print("[!] CUDA không khả dụng, dùng CPU")
+    
+    info = setup_cpu_optimizations()
+    return torch.device('cpu'), info
 
 
 # ============================================================
@@ -94,9 +106,9 @@ def get_device(preferred: str = 'auto') -> Tuple[torch.device, Dict]:
 
 def get_cifar10_loaders(
     data_dir: str = './data',
-    batch_size: int = 32,
-    num_workers: int = 0,  # Set 0 cho Windows để tránh multiprocessing issues
-    pin_memory: bool = False  # Disable khi không có GPU
+    batch_size: int = 16,
+    num_workers: int = 2,
+    use_gpu: bool = True
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Tạo DataLoaders cho CIFAR-10.
@@ -127,14 +139,16 @@ def get_cifar10_loaders(
         root=data_dir, train=False, download=False, transform=test_transform
     )
     
-    # DataLoaders
+    # DataLoaders - tối ưu cho GPU
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=True
+        num_workers=num_workers, pin_memory=use_gpu, drop_last=True,
+        persistent_workers=True if num_workers > 0 else False
     )
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory
+        num_workers=num_workers, pin_memory=use_gpu,
+        persistent_workers=True if num_workers > 0 else False
     )
     
     return train_loader, test_loader
@@ -146,7 +160,7 @@ def get_cifar10_loaders(
 
 class Trainer:
     """
-    Standard PyTorch Trainer.
+    PyTorch Trainer với GPU + AMP support.
     """
     
     def __init__(
@@ -155,10 +169,11 @@ class Trainer:
         criterion: nn.Module,
         optimizer: optim.Optimizer,
         device: torch.device,
-        use_amp: bool = False
+        accumulation_steps: int = 2
     ):
         self.device = device
-        self.use_amp = use_amp and device.type == 'cuda'
+        self.use_amp = device.type == 'cuda'
+        self.accumulation_steps = accumulation_steps
         self.scaler = None
         
         # Move to device
@@ -166,47 +181,56 @@ class Trainer:
         self.criterion = criterion.to(device)
         self.optimizer = optimizer
         
-        # Setup AMP (Automatic Mixed Precision) - chỉ cho CUDA
+        # Setup AMP (tự động cho GPU)
         if self.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
-            print("[✓] AMP enabled (CUDA)")
+            print(f"[✓] AMP enabled")
+            print(f"[✓] Gradient accumulation: {accumulation_steps} steps")
     
     def train_epoch(
         self, 
         train_loader: DataLoader, 
         epoch: int
     ) -> Dict[str, float]:
-        """Train một epoch."""
+        """Train một epoch với AMP + gradient accumulation."""
         self.model.train()
         
         total_loss = 0.0
         num_batches = 0
         start_time = time.time()
         
+        self.optimizer.zero_grad()
+        
         for batch_idx, (images, labels) in enumerate(train_loader):
-            images = images.to(self.device)
-            labels = labels.to(self.device)
-            
-            self.optimizer.zero_grad()
+            images = images.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
             
             # Forward pass với AMP nếu có
             if self.use_amp and self.scaler is not None:
                 with torch.cuda.amp.autocast():
                     hash_codes, _ = self.model(images)
                     loss = self.criterion(hash_codes, labels)
+                    loss = loss / self.accumulation_steps
                 
                 self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                
+                if (batch_idx + 1) % self.accumulation_steps == 0:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
             else:
                 # Standard FP32 training
                 hash_codes, _ = self.model(images)
                 loss = self.criterion(hash_codes, labels)
+                loss = loss / self.accumulation_steps
                 
                 loss.backward()
-                self.optimizer.step()
+                
+                if (batch_idx + 1) % self.accumulation_steps == 0:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
             
-            total_loss += loss.item()
+            total_loss += loss.item() * self.accumulation_steps
             num_batches += 1
             
             # Progress
@@ -214,10 +238,22 @@ class Trainer:
                 avg_loss = total_loss / num_batches
                 elapsed = time.time() - start_time
                 samples_per_sec = (batch_idx + 1) * train_loader.batch_size / elapsed
+                vram_info = ""
+                if self.device.type == 'cuda':
+                    vram = torch.cuda.memory_allocated() / 1024**3
+                    vram_info = f" | VRAM: {vram:.2f}GB"
                 print(f"  Batch [{batch_idx+1}/{len(train_loader)}] "
                       f"Loss: {avg_loss:.4f} | "
-                      f"Speed: {samples_per_sec:.1f} samples/s")
+                      f"Speed: {samples_per_sec:.1f} img/s{vram_info}")
         
+        # Handle remaining gradients
+        if len(train_loader) % self.accumulation_steps != 0:
+            if self.use_amp and self.scaler:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+            self.optimizer.zero_grad()
         epoch_time = time.time() - start_time
         avg_loss = total_loss / num_batches
         
@@ -333,20 +369,23 @@ def train(args):
     device, device_info = get_device(args.device)
     print(f"\n[Device]")
     print(f"  Type: {device.type}")
-    if device.type == 'cpu':
+    if device.type == 'cuda':
+        print(f"  Name: {device_info.get('name', 'N/A')}")
+        print(f"  VRAM: {device_info.get('vram_total', 0):.1f} GB")
+        print(f"  AMP: ✓ (auto)")
+    else:
         print(f"  Threads: {device_info.get('num_threads', 'N/A')}")
         print(f"  MKL-DNN: {'✓' if device_info.get('mkldnn') else '✗'}")
-    else:
-        print(f"  Name: {device_info.get('name', 'N/A')}")
-    print(f"  AMP: {'✓' if args.amp and device.type == 'cuda' else '✗'}")
     
     # Config
+    effective_batch = args.batch_size * args.accumulation_steps
     config = {
         'hash_bit': args.hash_bit,
         'batch_size': args.batch_size,
+        'accumulation': args.accumulation_steps,
+        'effective_batch': effective_batch,
         'epochs': args.epochs,
-        'lr': args.lr,
-        'amp': args.amp
+        'lr': args.lr
     }
     print(f"\n[Config]")
     for k, v in config.items():
@@ -358,7 +397,7 @@ def train(args):
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        pin_memory=device.type == 'cuda'
+        use_gpu=device.type == 'cuda'
     )
     print(f"  Train: {len(train_loader.dataset):,} images")
     print(f"  Test: {len(test_loader.dataset):,} images")
@@ -407,8 +446,11 @@ def train(args):
         criterion=criterion,
         optimizer=optimizer,
         device=device,
-        use_amp=args.amp
+        accumulation_steps=args.accumulation_steps
     )
+    
+    # Clear memory
+    clear_memory()
     
     # Training loop
     print(f"\n{'=' * 60}")
@@ -425,10 +467,11 @@ def train(args):
         train_metrics = trainer.train_epoch(train_loader, epoch)
         print(f"  Train Loss: {train_metrics['loss']:.4f} | "
               f"Time: {train_metrics['time']:.1f}s | "
-              f"Speed: {train_metrics['samples_per_sec']:.1f} samples/s")
+              f"Speed: {train_metrics['samples_per_sec']:.1f} img/s")
         
         # Evaluate
         if epoch % args.eval_every == 0 or epoch == args.epochs:
+            clear_memory()  # Clear trước khi eval
             eval_metrics = trainer.evaluate(test_loader)
             print(f"  Eval Loss: {eval_metrics['loss']:.4f} | mAP: {eval_metrics['mAP']:.4f}")
             
@@ -480,16 +523,16 @@ def main():
     
     # Training
     parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
-    parser.add_argument('--batch-size', type=int, default=32, help='Batch size')
+    parser.add_argument('--batch-size', type=int, default=16, help='Batch size (giảm nếu OOM)')
+    parser.add_argument('--accumulation-steps', type=int, default=2, 
+                       help='Gradient accumulation steps')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--num-workers', type=int, default=0, help='DataLoader workers (0 for Windows)')
+    parser.add_argument('--num-workers', type=int, default=2, help='DataLoader workers')
     parser.add_argument('--eval-every', type=int, default=5, help='Evaluate every N epochs')
     
     # Device
     parser.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'],
-                       help='Device to use')
-    parser.add_argument('--amp', action='store_true',
-                       help='Enable Automatic Mixed Precision (CUDA only)')
+                       help='Device to use (auto = prefer GPU)')
     
     # Quick test
     parser.add_argument('--quick', action='store_true', help='Quick test mode')
@@ -500,6 +543,7 @@ def main():
     if args.quick:
         args.epochs = 2
         args.batch_size = 8
+        args.accumulation_steps = 1
         args.eval_every = 1
     
     # Create save dir
