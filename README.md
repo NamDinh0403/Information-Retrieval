@@ -16,6 +16,26 @@
 8. [Dataset sử dụng](#8-dataset-sử-dụng)
 9. [Thực nghiệm (Experiments)](#9-thực-nghiệm-experiments)
 10. [Kế hoạch thực hiện](#10-kế-hoạch-thực-hiện)
+11. [Cài đặt và Chạy code](#-cài-đặt-và-chạy-code)
+12. [Giải thích các thành phần](#-giải-thích-các-thành-phần)
+
+---
+
+## ⚡ QUICK START
+
+```bash
+# Cài đặt dependencies
+pip install -r requirements.txt
+
+# Chạy training nhanh (3 epochs để test)
+python train_nwpu.py --quick
+
+# Chạy training đầy đủ với DINOv3 + Token Pruning
+python train_nwpu.py --model dinov3 --enable-pruning --keep-ratio 0.7 --epochs 30
+
+# Nếu GPU yếu (4GB VRAM)
+python train_nwpu.py --batch-size 4 --accumulation-steps 8
+```
 
 ---
 
@@ -790,6 +810,320 @@ Information Retrieval/
 
 ---
 
+## � CÀI ĐẶT VÀ CHẠY CODE
+
+### Yêu cầu hệ thống
+
+| Thành phần | Yêu cầu tối thiểu | Khuyến nghị |
+|------------|-------------------|-------------|
+| **OS** | Windows 10/11, Linux | Windows 11 |
+| **Python** | 3.9+ | 3.10+ |
+| **GPU** | GTX 1650 (4GB VRAM) | RTX 3060+ (8GB+) |
+| **RAM** | 8GB | 16GB+ |
+| **Disk** | 10GB free | 20GB+ |
+
+### Cài đặt môi trường
+
+```bash
+# 1. Clone repository
+git clone <repo-url>
+cd "Information Retrieval"
+
+# 2. Tạo virtual environment
+python -m venv venv
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # Linux/Mac
+
+# 3. Cài đặt dependencies
+pip install -r requirements.txt
+
+# 4. Tải dataset (NWPU-RESISC45 đã có sẵn trong data/archive/)
+# Hoặc tải thêm:
+python download_dataset.py
+python download_nwpu.py
+```
+
+### Cấu trúc thư mục
+
+```
+Information Retrieval/
+├── 📁 data/
+│   ├── archive/Dataset/          # NWPU-RESISC45 dataset
+│   │   ├── train/train/          # 45 class folders
+│   │   └── test/test/            # 45 class folders
+│   └── cifar-10-batches-py/      # CIFAR-10 dataset
+├── 📁 src/
+│   ├── model.py                  # ViT_Hashing (basic)
+│   ├── loss.py                   # CSQLoss
+│   ├── dataset.py                # Data loaders
+│   ├── evaluate.py               # Evaluation metrics
+│   └── 📁 research/              # Research components
+│       ├── dinov3_hashing.py     # DINOv3Hashing model
+│       ├── pruning.py            # Token Pruning modules
+│       ├── interpretability.py   # ViT-CX analyzer
+│       └── profiler.py           # Latency profiler
+├── 📁 checkpoints/               # Saved models
+├── train_nwpu.py                 # 🔥 Main training script
+├── train_gpu.py                  # GPU training (CIFAR-10)
+├── main_research.py              # Full research pipeline
+├── evaluate_nwpu.py              # Evaluation script
+└── README.md
+```
+
+---
+
+## 🎯 HƯỚNG DẪN CHẠY CODE
+
+### Quick Start - Chạy nhanh
+
+```bash
+# Test nhanh với 3 epochs
+python train_nwpu.py --quick
+
+# Train đầy đủ với DINOv3 + Token Pruning
+python train_nwpu.py --model dinov3 --enable-pruning --epochs 30
+```
+
+### Training với các cấu hình khác nhau
+
+#### 1. DINOv3Hashing (khuyến nghị - full research pipeline)
+
+```bash
+# DINOv3 cơ bản
+python train_nwpu.py --model dinov3
+
+# DINOv3 với Token Pruning (giảm 30% latency)
+python train_nwpu.py --model dinov3 --enable-pruning --keep-ratio 0.7
+
+# DINOv3 với pretrained weights (cần internet)
+python train_nwpu.py --model dinov3 --pretrained
+
+# DINOv3-Large (nặng hơn, chính xác hơn)
+python train_nwpu.py --model dinov3 --dinov3-variant vit_large_patch14_dinov2.lvd142m
+
+# DINOv3 với Gram Anchoring (DINOv3 simulation)
+python train_nwpu.py --model dinov3 --gram-anchoring
+```
+
+#### 2. ViT Basic (nhẹ hơn, nhanh hơn)
+
+```bash
+# ViT-B/32 (patch size 32)
+python train_nwpu.py --model vit --patch-size 32
+
+# ViT-B/16 (patch size 16, chính xác hơn)
+python train_nwpu.py --model vit --patch-size 16
+
+# ViT với custom weights
+python train_nwpu.py --model vit --weights ./ViT-B_32.npz
+```
+
+#### 3. Điều chỉnh Memory/VRAM
+
+```bash
+# Nếu GPU yếu (4GB VRAM) - giảm batch size
+python train_nwpu.py --batch-size 4 --accumulation-steps 8
+
+# GPU mạnh hơn (8GB+)
+python train_nwpu.py --batch-size 16 --accumulation-steps 2
+
+# CPU only (chậm)
+python train_nwpu.py --batch-size 2 --num-workers 0
+```
+
+### Danh sách Arguments đầy đủ
+
+| Argument | Default | Mô tả |
+|----------|---------|-------|
+| **Model Selection** |
+| `--model` | `dinov3` | Model: `dinov3` (DINOv3Hashing) hoặc `vit` (ViT_Hashing) |
+| `--dinov3-variant` | `vit_small_patch14_dinov2.lvd142m` | Backbone DINOv3: small/base/large |
+| `--pretrained` | `False` | Load pretrained DINOv2 weights |
+| `--freeze-backbone` | `False` | Đóng băng backbone |
+| `--gram-anchoring` | `False` | Bật Gram Anchoring |
+| **Hash Settings** |
+| `--hash-bit` | `64` | Số bit: 16, 32, 64, 128 |
+| `--patch-size` | `32` | Patch size cho ViT basic: 14, 16, 32 |
+| **Token Pruning** |
+| `--enable-pruning` | `False` | Bật Token Pruning |
+| `--keep-ratio` | `0.7` | Tỷ lệ token giữ lại (0.5 = 50%) |
+| `--pruning-method` | `fisher` | Method: `fisher` (V-Pruner) hoặc `attention` |
+| **Loss** |
+| `--lambda-q` | `0.0001` | Weight của Quantization Loss |
+| **Training** |
+| `--epochs` | `30` | Số epochs |
+| `--batch-size` | `8` | Batch size |
+| `--accumulation-steps` | `4` | Gradient accumulation |
+| `--lr` | `1e-4` | Learning rate |
+| `--weight-decay` | `0.01` | Weight decay |
+| **Data** |
+| `--data-dir` | `./data/archive/Dataset` | Đường dẫn dataset |
+| `--save-dir` | `./checkpoints` | Thư mục lưu model |
+| `--num-workers` | `2` | DataLoader workers |
+| `--eval-every` | `5` | Evaluate mỗi N epochs |
+
+---
+
+## 🧩 GIẢI THÍCH CÁC THÀNH PHẦN
+
+### 1. DINOv3Hashing (`src/research/dinov3_hashing.py`)
+
+**Mục đích:** Model chính kết hợp DINOv2/v3 backbone với Deep Hashing.
+
+```
+Input Image (224x224x3)
+         ↓
+┌─────────────────────────────┐
+│   DINOv2 Backbone (ViT)     │  ← Pretrained trên 142M images
+│   - Patch Embedding         │
+│   - Transformer Encoder     │
+│   - Global average pooling  │
+└─────────────────────────────┘
+         ↓
+    Features (768-dim)
+         ↓
+┌─────────────────────────────┐
+│      Hashing Head           │
+│   - Dropout(0.5)            │
+│   - Linear(768 → 1024)      │
+│   - ReLU                    │
+│   - Linear(1024 → hash_bit) │
+│   - Tanh → Sign (inference) │
+└─────────────────────────────┘
+         ↓
+    Hash Code (64-bit binary)
+```
+
+**Các biến thể DINOv3:**
+
+| Variant | Embed Dim | Params | Độ chính xác |
+|---------|-----------|--------|--------------|
+| `vit_small_patch14_dinov2` | 384 | 22M | Nhanh, nhẹ |
+| `vit_base_patch14_dinov2` | 768 | 86M | Cân bằng ⭐ |
+| `vit_large_patch14_dinov2` | 1024 | 307M | Chính xác nhất |
+
+### 2. Token Pruning (`src/research/pruning.py`)
+
+**Mục đích:** Giảm số lượng tokens để tăng tốc inference mà không giảm nhiều accuracy.
+
+**Các phương pháp:**
+
+| Class | Phương pháp | Cách hoạt động |
+|-------|-------------|----------------|
+| `TokenPruner` | V-Pruner (Fisher Information) | Tính điểm quan trọng = gradient² → giữ top-K tokens |
+| `AttentionBasedPruner` | Attention-based | Học prediction network để quyết định token nào giữ |
+| `TokenMerger` | AdaptiVision | Gộp tokens tương tự bằng soft k-means |
+
+**Hiệu quả Token Pruning:**
+
+| Keep Ratio | Tokens giữ lại | FLOPs giảm | mAP thay đổi |
+|------------|----------------|------------|--------------|
+| 100% | 197 | 0% | Baseline |
+| 80% | 158 | ~36% | -1% |
+| **70%** | **138** | **~51%** | **-2-3%** |
+| 50% | 99 | ~75% | -5-8% |
+
+### 3. CSQLoss (`src/loss.py`)
+
+**Mục đích:** Loss function cho Deep Hashing, kết hợp similarity learning với quantization.
+
+```python
+Total Loss = Center Loss + λ × Quantization Loss
+```
+
+**Center Loss:**
+- Kéo hash codes cùng class về cùng một center
+- Center được khởi tạo random, học cùng model
+
+**Quantization Loss:**
+- Đẩy giá trị hash về ±1 (binary)
+- Giảm lỗi khi chuyển từ continuous → discrete
+
+**Tham số `lambda_q`:**
+
+| λ_q | Ảnh hưởng |
+|-----|-----------|
+| 0.00001 | Ưu tiên similarity, hash chưa binary |
+| **0.0001** | **Cân bằng (khuyến nghị)** |
+| 0.001 | Ưu tiên binary, có thể giảm mAP |
+
+### 4. GPU Optimizations
+
+**Mixed Precision (AMP):**
+- Tự động sử dụng FP16 cho forward pass
+- Giảm ~50% VRAM usage
+- Tăng tốc training trên GPU hiện đại
+
+**Gradient Accumulation:**
+- Chia batch lớn thành nhiều mini-batch
+- `effective_batch = batch_size × accumulation_steps`
+- Cho phép train với VRAM hạn chế
+
+**Gradient Clipping:**
+- `max_norm=1.0` để ổn định training
+- Ngăn gradient explosion
+
+---
+
+## 📊 DATASET
+
+### NWPU-RESISC45 (Remote Sensing)
+
+**Thông tin:**
+- **Nguồn:** Northwestern Polytechnical University
+- **Kích thước:** 31,500 ảnh (45 class × 700 ảnh)
+- **Resolution:** 256×256 pixels
+- **Split mặc định:** Train 80% / Val 20%
+
+**45 Classes:**
+
+| # | Tên | # | Tên | # | Tên |
+|---|-----|---|-----|---|-----|
+| 1 | airplane | 16 | golf_course | 31 | railway_station |
+| 2 | airport | 17 | ground_track_field | 32 | rectangular_farmland |
+| 3 | baseball_diamond | 18 | harbor | 33 | river |
+| 4 | basketball_court | 19 | industrial_area | 34 | roundabout |
+| 5 | beach | 20 | intersection | 35 | runway |
+| 6 | bridge | 21 | island | 36 | sea_ice |
+| 7 | chaparral | 22 | lake | 37 | ship |
+| 8 | church | 23 | meadow | 38 | snowberg |
+| 9 | circular_farmland | 24 | medium_residential | 39 | sparse_residential |
+| 10 | cloud | 25 | mobile_home_park | 40 | stadium |
+| 11 | commercial_area | 26 | mountain | 41 | storage_tank |
+| 12 | dense_residential | 27 | overpass | 42 | tennis_court |
+| 13 | desert | 28 | palace | 43 | terrace |
+| 14 | forest | 29 | parking_lot | 44 | thermal_power_station |
+| 15 | freeway | 30 | railway | 45 | wetland |
+
+### CIFAR-10 (General Domain)
+
+**Thông tin:**
+- **Kích thước:** 60,000 ảnh (10 class × 6,000)
+- **Resolution:** 32×32 → resize to 224×224
+- **10 Classes:** airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck
+
+---
+
+## 📈 KẾT QUẢ MONG ĐỢI
+
+### Metrics
+
+| Metric | Công thức | Ý nghĩa |
+|--------|-----------|---------|
+| **mAP** | Mean Average Precision | Độ chính xác trung bình |
+| **P@K** | Precision at K | % relevant trong top-K |
+| **Latency** | ms/query | Thời gian xử lý 1 ảnh |
+
+### Kết quả baseline trên NWPU-RESISC45 (64-bit)
+
+| Model | mAP | P@10 | Latency |
+|-------|-----|------|---------|
+| ViT_Hashing (basic) | ~0.70 | ~0.75 | 15ms |
+| DINOv3Hashing | ~0.75 | ~0.82 | 12ms |
+| DINOv3 + Pruning (70%) | ~0.73 | ~0.80 | **8ms** |
+
+---
+
 ## 👨‍🎓 THÔNG TIN
 
 - **Môn học:** Truy vấn Thông tin Hình ảnh / Khoa học Dữ liệu Hình ảnh
@@ -799,4 +1133,4 @@ Information Retrieval/
 
 ---
 
-*Tài liệu được tạo: Tháng 3/2026*
+*Tài liệu được cập nhật: Tháng 3/2026*

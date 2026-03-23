@@ -1,14 +1,27 @@
 """
-GPU Training for NWPU-RESISC45 Dataset
-======================================
-Fine-tune ViT Hashing trên bộ dữ liệu remote sensing.
+GPU Training for NWPU-RESISC45 Dataset with Full Research Pipeline
+===================================================================
+Fine-tune DINOv2/v3 Hashing trên bộ dữ liệu remote sensing.
+
+Phương pháp: Kết hợp Vision Transformer (ViT) với Deep Hashing, 
+sử dụng DINOv2/v3 làm backbone và áp dụng Token Pruning để tối ưu hiệu năng.
+
+Features:
+    - DINOv3Hashing: DINOv2/v3 backbone + Hashing Head
+    - Token Pruning: V-Pruner (Fisher Information) / Attention-based pruning
+    - GPU Optimization: Mixed Precision (AMP) + Gradient Accumulation
+    - CSQLoss: Central Similarity Quantization với Quantization Loss
 
 Tối ưu cho GTX 1650 4GB VRAM.
 
 Usage:
-    python train_nwpu.py                    # Default
-    python train_nwpu.py --batch-size 4     # Nếu OOM
-    python train_nwpu.py --quick            # Quick test
+    python train_nwpu.py                              # Default (DINOv3 + Pruning)
+    python train_nwpu.py --model dinov3               # Use DINOv3Hashing
+    python train_nwpu.py --model vit                  # Use basic ViT_Hashing
+    python train_nwpu.py --enable-pruning             # Enable Token Pruning
+    python train_nwpu.py --keep-ratio 0.7             # Keep 70% tokens
+    python train_nwpu.py --batch-size 4               # Nếu OOM
+    python train_nwpu.py --quick                      # Quick test
 """
 
 import os
@@ -17,10 +30,11 @@ import time
 import argparse
 import gc
 from datetime import datetime
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 import torchvision.transforms as transforms
@@ -30,21 +44,31 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Basic model
 from src.model import ViT_Hashing
 from src.loss import CSQLoss
 
+# Research components
+from src.research.dinov3_hashing import DINOv3Hashing, HashingHead
+from src.research.pruning import TokenPruner, AttentionBasedPruner, TokenMerger, analyze_pruning_effect
+
 
 def check_gpu():
-    """Kiểm tra GPU."""
+    """Kiểm tra GPU và in thông tin chi tiết."""
     if not torch.cuda.is_available():
         print("[!] CUDA không khả dụng!")
         return False
     
-    print(f"[GPU] {torch.cuda.get_device_name(0)}")
-    print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    print(f"\n[GPU Info]")
+    print(f"  Device: {torch.cuda.get_device_name(0)}")
+    print(f"  VRAM Total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    print(f"  VRAM Free: {(torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1024**3:.1f} GB")
+    print(f"  CUDA Version: {torch.version.cuda}")
+    print(f"  cuDNN Enabled: {torch.backends.cudnn.enabled}")
     
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+    # Optimize settings cho GPU
+    torch.backends.cudnn.benchmark = True  # Auto-tune convolutions
+    torch.backends.cuda.matmul.allow_tf32 = True  # TF32 cho Ampere+
     
     return True
 
@@ -129,31 +153,70 @@ def get_nwpu_loaders(
 
 
 class NWPUTrainer:
-    """Trainer cho NWPU-RESISC45."""
+    """
+    Trainer cho NWPU-RESISC45 với đầy đủ research features.
+    
+    Features:
+        - Mixed Precision Training (AMP)
+        - Gradient Accumulation
+        - Token Pruning (V-Pruner / Attention-based)
+        - DINOv3Hashing support
+    """
     
     def __init__(
         self,
         model: nn.Module,
         criterion: nn.Module,
         optimizer: optim.Optimizer,
-        accumulation_steps: int = 4
+        accumulation_steps: int = 4,
+        enable_pruning: bool = False,
+        keep_ratio: float = 0.7,
+        pruning_method: str = 'fisher'  # 'fisher' hoặc 'attention'
     ):
-        self.device = torch.device('cuda')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.accumulation_steps = accumulation_steps
+        self.enable_pruning = enable_pruning
         
         self.model = model.to(self.device)
         self.criterion = criterion.to(self.device)
         self.optimizer = optimizer
         
+        # Mixed precision
         self.scaler = torch.cuda.amp.GradScaler()
+        
+        # Token Pruning setup
+        if enable_pruning:
+            self.pruner = TokenPruner(keep_ratio=keep_ratio, min_tokens=16)
+            if pruning_method == 'attention':
+                # Get embed_dim from model
+                if hasattr(model, 'backbone'):
+                    embed_dim = model.backbone.num_features
+                else:
+                    embed_dim = 768  # Default ViT-B
+                self.attention_pruner = AttentionBasedPruner(
+                    embed_dim=embed_dim, 
+                    keep_ratio=keep_ratio
+                ).to(self.device)
+            else:
+                self.attention_pruner = None
+            print(f"  [Pruning] Enabled - Method: {pruning_method}, Keep ratio: {keep_ratio}")
+        else:
+            self.pruner = None
+            self.attention_pruner = None
+        
+        # Pruning statistics
+        self.pruning_stats = []
     
     def train_epoch(self, train_loader: DataLoader, epoch: int) -> Dict[str, float]:
-        """Train một epoch."""
+        """Train một epoch với Token Pruning support."""
         self.model.train()
+        if self.attention_pruner:
+            self.attention_pruner.train()
         
         total_loss = 0.0
         num_batches = 0
         start_time = time.time()
+        epoch_pruning_stats = []
         
         self.optimizer.zero_grad()
         
@@ -162,7 +225,35 @@ class NWPUTrainer:
             labels = labels.to(self.device, non_blocking=True)
             
             with torch.cuda.amp.autocast():
-                hash_codes, _ = self.model(images)
+                # Forward với Token Pruning (nếu enabled)
+                if self.enable_pruning and hasattr(self.model, 'get_patch_tokens'):
+                    # Lấy patch tokens trước khi hash
+                    patch_tokens = self.model.get_patch_tokens(images)
+                    
+                    # Apply pruning
+                    if self.attention_pruner:
+                        pruned_tokens, _ = self.attention_pruner(patch_tokens)
+                    else:
+                        # Fisher-based pruning
+                        scores = self.pruner.compute_fisher_scores(patch_tokens)
+                        pruned_tokens, kept_indices = self.pruner.prune_tokens(
+                            patch_tokens, scores, keep_cls=True
+                        )
+                    
+                    # Lưu stats
+                    epoch_pruning_stats.append({
+                        'original': patch_tokens.shape[1],
+                        'pruned': pruned_tokens.shape[1]
+                    })
+                    
+                    # Forward qua phần còn lại của model
+                    cls_token = pruned_tokens[:, 0]  # CLS token
+                    hash_codes = self.model.hashing_head(cls_token)
+                    features = cls_token
+                else:
+                    # Standard forward
+                    hash_codes, features = self.model(images)
+                
                 loss = self.criterion(hash_codes, labels)
                 loss = loss / self.accumulation_steps
             
@@ -172,6 +263,10 @@ class NWPUTrainer:
             num_batches += 1
             
             if (batch_idx + 1) % self.accumulation_steps == 0:
+                # Gradient clipping để ổn định training
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
@@ -181,14 +276,28 @@ class NWPUTrainer:
                 elapsed = time.time() - start_time
                 speed = (batch_idx + 1) * train_loader.batch_size / elapsed
                 vram = torch.cuda.memory_allocated() / 1024**3
+                pruning_info = ""
+                if epoch_pruning_stats:
+                    avg_kept = np.mean([s['pruned']/s['original'] for s in epoch_pruning_stats])
+                    pruning_info = f" | Kept: {avg_kept:.1%}"
                 print(f"  [{batch_idx+1}/{len(train_loader)}] "
-                      f"Loss: {avg_loss:.4f} | {speed:.1f} img/s | VRAM: {vram:.2f}GB")
+                      f"Loss: {avg_loss:.4f} | {speed:.1f} img/s | VRAM: {vram:.2f}GB{pruning_info}")
         
         # Remaining gradients
         if len(train_loader) % self.accumulation_steps != 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
+        
+        # Store pruning stats
+        if epoch_pruning_stats:
+            self.pruning_stats.append({
+                'epoch': epoch,
+                'avg_kept_ratio': np.mean([s['pruned']/s['original'] for s in epoch_pruning_stats]),
+                'num_samples': len(epoch_pruning_stats)
+            })
         
         return {
             'loss': total_loss / num_batches,
@@ -198,8 +307,10 @@ class NWPUTrainer:
     
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader, desc: str = "Eval") -> Dict[str, float]:
-        """Đánh giá model."""
+        """Đánh giá model với pruning support."""
         self.model.eval()
+        if self.attention_pruner:
+            self.attention_pruner.eval()
         
         all_codes = []
         all_labels = []
@@ -211,7 +322,23 @@ class NWPUTrainer:
             labels = labels.to(self.device, non_blocking=True)
             
             with torch.cuda.amp.autocast():
-                hash_codes, _ = self.model(images)
+                # Forward với Token Pruning (nếu enabled)
+                if self.enable_pruning and hasattr(self.model, 'get_patch_tokens'):
+                    patch_tokens = self.model.get_patch_tokens(images)
+                    
+                    if self.attention_pruner:
+                        pruned_tokens, _ = self.attention_pruner(patch_tokens)
+                    else:
+                        scores = self.pruner.compute_fisher_scores(patch_tokens)
+                        pruned_tokens, _ = self.pruner.prune_tokens(
+                            patch_tokens, scores, keep_cls=True
+                        )
+                    
+                    cls_token = pruned_tokens[:, 0]
+                    hash_codes = self.model.hashing_head(cls_token)
+                else:
+                    hash_codes, _ = self.model(images)
+                
                 loss = self.criterion(hash_codes, labels)
             
             all_codes.append(hash_codes.cpu())
@@ -257,27 +384,36 @@ class NWPUTrainer:
         return np.mean(aps) if aps else 0.0
     
     def save(self, path: str, epoch: int, metrics: Dict):
-        """Lưu checkpoint."""
-        torch.save({
+        """Lưu checkpoint với pruning state."""
+        checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scaler_state_dict': self.scaler.state_dict(),
-            'metrics': metrics
-        }, path)
+            'metrics': metrics,
+            'pruning_enabled': self.enable_pruning,
+            'pruning_stats': self.pruning_stats
+        }
+        
+        # Save attention pruner nếu có
+        if self.attention_pruner is not None:
+            checkpoint['attention_pruner_state'] = self.attention_pruner.state_dict()
+        
+        torch.save(checkpoint, path)
         print(f"[✓] Saved: {path}")
 
 
 def train(args):
-    """Main training."""
+    """Main training với full research pipeline."""
     
-    print("=" * 60)
-    print("NWPU-RESISC45 TRAINING")
-    print("=" * 60)
+    print("=" * 70)
+    print("NWPU-RESISC45 TRAINING - Full Research Pipeline")
+    print("=" * 70)
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\nPhương pháp: ViT + Deep Hashing + DINOv2/v3 backbone + Token Pruning")
     
     if not check_gpu():
-        return
+        print("[!] Tiếp tục với CPU (chậm hơn nhiều)")
     
     # Data
     print(f"\n[Data] Loading NWPU-RESISC45...")
@@ -292,63 +428,98 @@ def train(args):
     print(f"  Val: {len(val_loader.dataset)}")
     print(f"  Test: {len(test_loader.dataset)}")
     
-    # Model
-    print(f"\n[Model] Creating ViT_Hashing...")
-    model_name = 'vit_base_patch32_224' if args.patch_size == 32 else 'vit_base_patch16_224'
+    # Model selection
+    print(f"\n[Model] Creating model...")
     
-    model = ViT_Hashing(
-        model_name=model_name,
-        pretrained=True,  # Load ImageNet pretrained
-        hash_bit=args.hash_bit,
-        weights_path=args.weights
-    )
+    if args.model == 'dinov3':
+        # DINOv3Hashing - Full research model
+        model_name_dinov3 = args.dinov3_variant
+        print(f"  Type: DINOv3Hashing")
+        print(f"  Backbone: {model_name_dinov3}")
+        
+        model = DINOv3Hashing(
+            model_name=model_name_dinov3,
+            pretrained=args.pretrained,
+            hash_bit=args.hash_bit,
+            freeze_backbone=args.freeze_backbone,
+            use_gram_anchoring=args.gram_anchoring,
+            hidden_dim=1024,
+            dropout=0.5
+        )
+    else:
+        # Basic ViT_Hashing
+        model_name = 'vit_base_patch32_224' if args.patch_size == 32 else 'vit_base_patch16_224'
+        print(f"  Type: ViT_Hashing (basic)")
+        print(f"  Backbone: {model_name}")
+        
+        model = ViT_Hashing(
+            model_name=model_name,
+            pretrained=True,
+            hash_bit=args.hash_bit,
+            weights_path=args.weights
+        )
     
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"  Model: {model_name}")
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Hash bit: {args.hash_bit}")
-    print(f"  Parameters: {num_params/1e6:.1f}M")
+    print(f"  Parameters: {num_params/1e6:.1f}M (Trainable: {trainable_params/1e6:.1f}M)")
     
-    # Loss với 45 classes
+    # Loss: CSQLoss với 45 classes
+    print(f"\n[Loss] CSQLoss")
     criterion = CSQLoss(
         hash_bit=args.hash_bit,
         num_classes=num_classes,  # 45 classes!
-        lambda_q=0.0001
+        lambda_q=args.lambda_q
     )
+    print(f"  lambda_q (Quantization): {args.lambda_q}")
     
-    # Optimizer
+    # Optimizer với differential learning rates
+    print(f"\n[Optimizer] AdamW với differential LR")
     optimizer = optim.AdamW([
-        {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
-        {'params': model.hashing_head.parameters(), 'lr': args.lr}
-    ], weight_decay=0.01)
+        {'params': model.backbone.parameters(), 'lr': args.lr * 0.1, 'name': 'backbone'},
+        {'params': model.hashing_head.parameters(), 'lr': args.lr, 'name': 'hashing_head'}
+    ], weight_decay=args.weight_decay)
+    print(f"  Backbone LR: {args.lr * 0.1}")
+    print(f"  Head LR: {args.lr}")
+    print(f"  Weight decay: {args.weight_decay}")
     
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-6
     )
     
-    # Trainer
+    # Trainer với pruning support
+    print(f"\n[Trainer] Creating trainer...")
     trainer = NWPUTrainer(
         model=model,
         criterion=criterion,
         optimizer=optimizer,
-        accumulation_steps=args.accumulation_steps
+        accumulation_steps=args.accumulation_steps,
+        enable_pruning=args.enable_pruning,
+        keep_ratio=args.keep_ratio,
+        pruning_method=args.pruning_method
     )
     
     clear_memory()
     
     # Config summary
-    print(f"\n[Config]")
+    print(f"\n[Config Summary]")
+    print(f"  Model: {args.model}")
     print(f"  Batch size: {args.batch_size}")
     print(f"  Accumulation: {args.accumulation_steps}")
     print(f"  Effective batch: {args.batch_size * args.accumulation_steps}")
     print(f"  Epochs: {args.epochs}")
-    print(f"  LR: {args.lr}")
+    print(f"  Token Pruning: {'Enabled' if args.enable_pruning else 'Disabled'}")
+    if args.enable_pruning:
+        print(f"    - Method: {args.pruning_method}")
+        print(f"    - Keep ratio: {args.keep_ratio}")
     
     # Training
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 70}")
     print("TRAINING")
-    print("=" * 60)
+    print("=" * 70)
     
     best_map = 0.0
+    training_history = []
     
     for epoch in range(1, args.epochs + 1):
         print(f"\n[Epoch {epoch}/{args.epochs}]")
@@ -365,58 +536,124 @@ def train(args):
             val_metrics = trainer.evaluate(val_loader, "Val")
             print(f"  Val - Loss: {val_metrics['loss']:.4f} | mAP: {val_metrics['mAP']:.4f}")
             
+            training_history.append({
+                'epoch': epoch,
+                'train_loss': train_metrics['loss'],
+                'val_loss': val_metrics['loss'],
+                'val_mAP': val_metrics['mAP']
+            })
+            
             if val_metrics['mAP'] > best_map:
                 best_map = val_metrics['mAP']
-                trainer.save(
-                    os.path.join(args.save_dir, 'best_model_nwpu.pth'),
-                    epoch, val_metrics
-                )
+                save_path = os.path.join(args.save_dir, f'best_model_nwpu_{args.model}.pth')
+                trainer.save(save_path, epoch, val_metrics)
         
         scheduler.step()
     
     # Final test
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 70}")
     print("FINAL TEST")
-    print("=" * 60)
+    print("=" * 70)
     
     clear_memory()
     test_metrics = trainer.evaluate(test_loader, "Test")
     print(f"  Test mAP: {test_metrics['mAP']:.4f}")
     
+    # Pruning analysis
+    if trainer.pruning_stats:
+        print(f"\n[Pruning Analysis]")
+        avg_kept = np.mean([s['avg_kept_ratio'] for s in trainer.pruning_stats])
+        print(f"  Average tokens kept: {avg_kept:.1%}")
+        print(f"  FLOPs reduction estimate: {(1 - avg_kept**2):.1%}")
+    
     # Summary
-    print(f"\n{'=' * 60}")
-    print("COMPLETE")
-    print("=" * 60)
+    print(f"\n{'=' * 70}")
+    print("TRAINING COMPLETE")
+    print("=" * 70)
+    print(f"  Model: {args.model}")
+    print(f"  Token Pruning: {'Enabled' if args.enable_pruning else 'Disabled'}")
     print(f"  Best Val mAP: {best_map:.4f}")
     print(f"  Test mAP: {test_metrics['mAP']:.4f}")
-    print(f"  Model: {os.path.join(args.save_dir, 'best_model_nwpu.pth')}")
+    print(f"  Checkpoint: {os.path.join(args.save_dir, f'best_model_nwpu_{args.model}.pth')}")
+    
+    # Save training history
+    import json
+    history_path = os.path.join(args.save_dir, f'training_history_{args.model}.json')
+    with open(history_path, 'w') as f:
+        json.dump(training_history, f, indent=2)
+    print(f"  History: {history_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Train ViT Hashing on NWPU-RESISC45',
+        description='Train ViT/DINOv3 Hashing on NWPU-RESISC45 with Token Pruning',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
     # Data
-    parser.add_argument('--data-dir', default='./data/archive/Dataset')
-    parser.add_argument('--save-dir', default='./checkpoints')
+    parser.add_argument('--data-dir', default='./data/archive/Dataset',
+                       help='Path to NWPU-RESISC45 dataset')
+    parser.add_argument('--save-dir', default='./checkpoints',
+                       help='Directory to save checkpoints')
     
-    # Model
-    parser.add_argument('--hash-bit', type=int, default=64)
-    parser.add_argument('--patch-size', type=int, default=32, choices=[16, 32])
-    parser.add_argument('--weights', type=str, default=None, help='Pretrained .npz weights')
+    # Model selection
+    parser.add_argument('--model', type=str, default='dinov3', choices=['dinov3', 'vit'],
+                       help='Model type: dinov3 (DINOv3Hashing) or vit (basic ViT_Hashing)')
+    parser.add_argument('--dinov3-variant', type=str, default='vit_small_patch14_dinov2.lvd142m',
+                       choices=[
+                           'vit_small_patch14_dinov2.lvd142m',
+                           'vit_base_patch14_dinov2.lvd142m',
+                           'vit_large_patch14_dinov2.lvd142m',
+                           'vit_base_patch16_224'
+                       ],
+                       help='DINOv3 backbone variant')
+    parser.add_argument('--pretrained', action='store_true', default=False,
+                       help='Load pretrained DINOv2 weights (requires internet)')
+    parser.add_argument('--freeze-backbone', action='store_true', default=False,
+                       help='Freeze backbone weights during training')
+    parser.add_argument('--gram-anchoring', action='store_true', default=False,
+                       help='Enable Gram Anchoring (DINOv3 simulation)')
+    
+    # Hash settings
+    parser.add_argument('--hash-bit', type=int, default=64, choices=[16, 32, 64, 128],
+                       help='Number of hash bits')
+    parser.add_argument('--patch-size', type=int, default=32, choices=[14, 16, 32],
+                       help='Patch size for basic ViT model')
+    parser.add_argument('--weights', type=str, default=None, 
+                       help='Pretrained .npz weights path (for basic ViT)')
+    
+    # Token Pruning
+    parser.add_argument('--enable-pruning', action='store_true', default=False,
+                       help='Enable Token Pruning for efficiency')
+    parser.add_argument('--keep-ratio', type=float, default=0.7,
+                       help='Token keep ratio for pruning (0.5 = 50%% tokens kept)')
+    parser.add_argument('--pruning-method', type=str, default='fisher',
+                       choices=['fisher', 'attention'],
+                       help='Pruning method: fisher (V-Pruner) or attention (learnable)')
+    
+    # Loss
+    parser.add_argument('--lambda-q', type=float, default=0.0001,
+                       help='Quantization loss weight in CSQLoss')
     
     # Training
-    parser.add_argument('--epochs', type=int, default=30)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--accumulation-steps', type=int, default=4)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--num-workers', type=int, default=2)
-    parser.add_argument('--eval-every', type=int, default=5)
+    parser.add_argument('--epochs', type=int, default=30,
+                       help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=8,
+                       help='Batch size per step')
+    parser.add_argument('--accumulation-steps', type=int, default=4,
+                       help='Gradient accumulation steps')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                       help='Learning rate for hashing head')
+    parser.add_argument('--weight-decay', type=float, default=0.01,
+                       help='Weight decay for AdamW optimizer')
+    parser.add_argument('--num-workers', type=int, default=2,
+                       help='DataLoader workers')
+    parser.add_argument('--eval-every', type=int, default=5,
+                       help='Evaluate every N epochs')
     
-    # Quick
-    parser.add_argument('--quick', action='store_true')
+    # Quick test
+    parser.add_argument('--quick', action='store_true',
+                       help='Quick test mode (3 epochs)')
     
     args = parser.parse_args()
     
@@ -424,6 +661,7 @@ def main():
         args.epochs = 3
         args.batch_size = 4
         args.eval_every = 1
+        print("[Quick mode] epochs=3, batch_size=4")
     
     os.makedirs(args.save_dir, exist_ok=True)
     
