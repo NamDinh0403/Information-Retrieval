@@ -1,17 +1,18 @@
-# ĐỒ ÁN MÔN HỌC: TRUY VẤN THÔNG TIN HÌNH ẢNH
+# ĐỒ ÁN THẠC SĨ: TRUY VẤN THÔNG TIN HÌNH ẢNH
 
-## Hệ thống Truy vấn Ảnh Viễn thám sử dụng Vision Transformer và Deep Hashing
+## Nghiên cứu Vision Transformer cho Truy vấn Ảnh Viễn thám: So sánh Backbone và Phân tích Hash Codes
 
 ---
 
 ## 📋 MỤC LỤC
 
-1. [Tổng quan](#1-tổng-quan)
-2. [Bài toán Image Retrieval](#2-bài-toán-image-retrieval)
+1. [Tổng quan nghiên cứu](#1-tổng-quan-nghiên-cứu)
+2. [Câu hỏi nghiên cứu](#2-câu-hỏi-nghiên-cứu)
 3. [Phương pháp](#3-phương-pháp)
-4. [Thực nghiệm](#4-thực-nghiệm)
+4. [Thiết kế thực nghiệm](#4-thiết-kế-thực-nghiệm)
 5. [Hướng dẫn chạy code](#5-hướng-dẫn-chạy-code)
-6. [Kết quả](#6-kết-quả)
+6. [Phân tích kết quả](#6-phân-tích-kết-quả)
+7. [Kết luận](#7-kết-luận)
 
 ---
 
@@ -21,330 +22,478 @@
 # Cài đặt
 pip install -r requirements.txt
 
-# Train với ViT (cơ bản)
-python train_nwpu.py --model vit --epochs 30
+# 1. Train baseline (ViT + Hashing)
+python experiments/train.py --model vit --epochs 30
 
-# Train với DINOv2 (so sánh)
-python train_nwpu.py --model dinov3 --epochs 30
+# 2. So sánh với DINOv2
+python experiments/train.py --model dinov3 --epochs 30
 
-# Quick test (3 epochs)
-python train_nwpu.py --quick
+# 3. Chạy ablation study
+python experiments/ablation.py
+
+# 4. Visualization & Analysis
+python experiments/visualize.py --checkpoint ./checkpoints/best_model_nwpu_vit.pth
+
+# 5. Evaluate model
+python experiments/evaluate.py --checkpoint ./checkpoints/best_model.pth
 ```
 
 ---
 
-## 1. TỔNG QUAN
+## 1. TỔNG QUAN NGHIÊN CỨU
 
-### 1.1 Đề tài
+### 1.1 Bối cảnh
 
-**Xây dựng hệ thống Content-Based Image Retrieval (CBIR) cho ảnh viễn thám** sử dụng Vision Transformer kết hợp Deep Hashing.
+**Content-Based Image Retrieval (CBIR)** cho ảnh viễn thám là bài toán quan trọng trong:
+- Giám sát môi trường và biến đổi khí hậu
+- Quy hoạch đô thị và quản lý tài nguyên
+- Ứng dụng quốc phòng và an ninh
 
-### 1.2 Mục tiêu
+**Thách thức đặc thù của ảnh viễn thám:**
 
-| # | Mục tiêu | Đo lường |
-|---|----------|----------|
-| 1 | Xây dựng hệ thống CBIR **hoạt động** | Input ảnh → Output top-K ảnh tương tự |
-| 2 | Đạt **mAP ≥ 0.65** trên NWPU-RESISC45 | Mean Average Precision |
-| 3 | **(Optional)** So sánh ViT vs DINOv2 backbone | Bảng so sánh mAP |
+| Thách thức | Mô tả | Ví dụ |
+|------------|-------|-------|
+| **Intra-class variance cao** | Cùng class nhưng khác về visual | Airport ở Mỹ vs Airport ở Châu Á |
+| **Inter-class similarity cao** | Khác class nhưng giống visual | Airport ↔ Runway |
+| **Scale variation** | Cùng object nhưng khác kích thước | Tàu gần vs xa |
 
-### 1.3 Tại sao chọn đề tài này?
+### 1.2 Đóng góp của nghiên cứu
 
-**Truy vấn ảnh viễn thám** có ứng dụng thực tế:
-- Giám sát môi trường, biến đổi khí hậu
-- Quy hoạch đô thị, nông nghiệp
-- Phát hiện đối tượng (tàu, máy bay, công trình)
+| # | Đóng góp | Loại | Mô tả |
+|---|----------|------|-------|
+| 1 | **Hệ thống CBIR** | Engineering | Pipeline hoàn chỉnh: ViT → Hashing → Retrieval |
+| 2 | **So sánh backbone** | Research | ViT-ImageNet vs DINOv2 cho remote sensing |
+| 3 | **Ablation study** | Analysis | Hash bits, feature layers |
+| 4 | **Failure analysis** | Insight | Phân tích model sai ở đâu và tại sao |
 
-**Deep Hashing** là kỹ thuật hiệu quả cho retrieval:
-- Chuyển ảnh → mã nhị phân (64 bits)
-- Tìm kiếm bằng Hamming distance (rất nhanh)
-- Tiết kiệm bộ nhớ lưu trữ
+### 1.3 Kiến trúc tổng quan
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌────────────┐
+│ Input Image │ ──→ │   Backbone   │ ──→ │ Hash Head   │ ──→ │ Hash Code  │
+│  224×224    │     │ ViT / DINOv2 │     │  MLP+Tanh   │     │  64 bits   │
+└─────────────┘     └──────────────┘     └─────────────┘     └────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  CSQ Loss   │
+                    │ Center+Quant│
+                    └─────────────┘
+```
 
 ---
 
-## 2. BÀI TOÁN IMAGE RETRIEVAL
+## 2. CÂU HỎI NGHIÊN CỨU
 
-### 2.1 Định nghĩa
+### RQ1: Backbone nào phù hợp hơn cho Remote Sensing Image Retrieval?
 
-```
-INPUT:  Query image (ảnh truy vấn)
-        Database (N ảnh trong cơ sở dữ liệu)
-        
-OUTPUT: Top-K ảnh trong database tương tự nhất với query
-```
+| Backbone | Pretraining | Data size | Đặc điểm |
+|----------|-------------|-----------|----------|
+| **ViT-B/32** | Supervised (ImageNet) | 1.2M | Học phân biệt 1000 classes tự nhiên |
+| **DINOv2-S/14** | Self-supervised | 142M | Học features tổng quát không cần labels |
 
-### 2.2 Ví dụ
+**Giả thuyết:** DINOv2 sẽ tốt hơn vì:
+- Self-supervised learning không bị bias về ImageNet categories
+- Pretrained trên 142M ảnh diverse hơn
+- Patch size nhỏ hơn (14 vs 32) → capture chi tiết tốt hơn
 
-```
-Query: Ảnh sân bay (airport_001.jpg)
-Database: 31,500 ảnh NWPU-RESISC45
+**Cách kiểm chứng:**
+- So sánh mAP trên cùng test set
+- Visualize attention maps để xem model focus khác nhau thế nào
 
-Output (Top-5):
-  1. airport_045.jpg  ✓ Relevant
-  2. airport_123.jpg  ✓ Relevant  
-  3. runway_089.jpg   ✗ (gần giống nhưng khác class)
-  4. airport_234.jpg  ✓ Relevant
-  5. airport_012.jpg  ✓ Relevant
-  
-→ Precision@5 = 4/5 = 0.80
-```
+---
 
-### 2.3 Tại sao dùng Hashing?
+### RQ2: Số hash bits tối ưu cho NWPU-RESISC45?
 
-| Phương pháp | Feature size | Phép tính | Tốc độ |
-|-------------|--------------|-----------|--------|
-| **Float features** | 768 × 4 = 3KB/ảnh | Cosine similarity | Chậm |
-| **Binary hash** | 64 bits = 8 bytes/ảnh | XOR + count | **Nhanh** |
+| Hash bits | Storage | Trade-off hypothesis |
+|-----------|---------|---------------------|
+| 16 bits | 2 bytes/img | Quá ít → mất thông tin → mAP thấp |
+| 32 bits | 4 bytes/img | Có thể đủ cho dataset nhỏ |
+| **64 bits** | **8 bytes/img** | **Sweet spot cho 45 classes?** |
+| 128 bits | 16 bytes/img | Có thể overkill, không cải thiện nhiều |
 
-**Với database 1 triệu ảnh:**
-- Float: 3GB storage, ~100ms/query
-- Hash: 8MB storage, ~1ms/query
+**Giả thuyết:** 64 bits là đủ. Với 45 classes, mỗi class cần ~1.4 bits để encode. 64 bits dư để encode cả semantic và variation.
+
+**Cách kiểm chứng:**
+- Train với 16, 32, 64, 128 bits
+- So sánh mAP và storage/speed trade-off
+
+---
+
+### RQ3: Model fails ở đâu và tại sao?
+
+**Mục tiêu:** Không chỉ report mAP, mà phải hiểu:
+- Classes nào hay bị confuse?
+- Có pattern nào trong failure cases?
+- Insight để cải thiện?
+
+**Cách phân tích:**
+- Confusion matrix
+- Per-class mAP breakdown
+- Visualize failure cases
 
 ---
 
 ## 3. PHƯƠNG PHÁP
 
-### 3.1 Kiến trúc tổng quan
+### 3.1 Backbone Options
 
+#### A. ViT-B/32 (Baseline)
 ```
-┌─────────────┐      ┌──────────────┐      ┌─────────────┐      ┌────────────┐
-│ Input Image │ ───→ │ ViT Backbone │ ───→ │ Hash Head   │ ───→ │ Hash Code  │
-│ 224×224×3   │      │ (feature     │      │ (MLP+Tanh)  │      │ 64 bits    │
-└─────────────┘      │  extraction) │      └─────────────┘      └────────────┘
-                     └──────────────┘
+- Pretrained: ImageNet-1K (supervised classification)
+- Patch size: 32×32 → 49 patches cho ảnh 224×224
+- Embedding dim: 768
+- Layers: 12 transformer blocks
+- Output: CLS token (768-dim)
 ```
 
-### 3.2 Các thành phần
+#### B. DINOv2-S/14 (Comparison)
+```
+- Pretrained: LVD-142M (self-supervised, no labels)
+- Patch size: 14×14 → 256 patches cho ảnh 224×224
+- Embedding dim: 384
+- Layers: 12 transformer blocks
+- Output: CLS token (384-dim)
+```
 
-#### A. Backbone: Vision Transformer
+**Tại sao so sánh 2 này?**
+- Supervised vs Self-supervised pretraining
+- Natural images (ImageNet) vs General images (LVD)
+- Coarse patches (32) vs Fine patches (14)
 
-**ViT-B/32 (cơ bản):**
-- Pretrained trên ImageNet (1.2M ảnh)
-- Chia ảnh thành patches 32×32
-- Output: feature vector 768-dim
-
-**DINOv2 (so sánh - optional):**
-- Pretrained trên 142M ảnh (self-supervised)
-- Chia ảnh thành patches 14×14
-- Có thể tốt hơn cho domain-specific images
-
-#### B. Hashing Head
+### 3.2 Hashing Head
 
 ```python
-Hashing Head:
-  Input (768-dim) 
-  → Dropout(0.5) 
-  → Linear(768, 1024) 
-  → ReLU 
-  → Linear(1024, 64) 
-  → Tanh 
-  → Output (64-dim, range [-1, 1])
+HashingHead(embed_dim, hash_bit=64):
+    Dropout(0.5)           # Regularization
+    Linear(embed_dim, 1024) # Project to intermediate
+    ReLU()                  # Non-linearity
+    Linear(1024, hash_bit)  # Project to hash dimension
+    Tanh()                  # Output in [-1, 1]
 
-Inference: sign(output) → binary {-1, +1}
+# Training: continuous values
+# Inference: sign() → binary {-1, +1}
 ```
 
-#### C. Loss Function: CSQ (Central Similarity Quantization)
+### 3.3 Loss Function: CSQ
 
 ```
-Total Loss = Center Loss + λ × Quantization Loss
+L_total = L_center + λ × L_quant
 
-Center Loss: Kéo hash codes cùng class về gần nhau
-Quant Loss: Đẩy giá trị về ±1 để binary hóa tốt hơn
+L_center = (1/B) Σ ||h_i - c_{y_i}||²
+  → Kéo hash codes cùng class về center của class đó
+
+L_quant = (1/B) Σ (|h_i| - 1)²
+  → Đẩy giá trị về ±1 để quantization error thấp
 ```
 
-### 3.3 Retrieval Process
+**Hyperparameters:**
+- λ = 0.0001 (quantization weight)
+- Centers c_k được initialize random và học cùng model
+
+### 3.4 Retrieval
 
 ```
-1. INDEXING (offline - chạy 1 lần):
-   - Với mỗi ảnh trong database: image → model → hash code
-   - Lưu tất cả hash codes
-   
-2. QUERY (online - mỗi lần tìm kiếm):
-   - Query image → model → query hash
-   - Tính Hamming distance với tất cả hash codes trong database
-   - Trả về top-K ảnh có distance nhỏ nhất
+Hamming Distance: d(q, x) = Σ (q_i XOR x_i)
+  - q: query hash (64 bits)
+  - x: database hash (64 bits)
+  - XOR + popcount: O(1) với hardware support
+
+Ranking: Sort database by Hamming distance ascending
 ```
 
 ---
 
-## 4. THỰC NGHIỆM
+## 4. THIẾT KẾ THỰC NGHIỆM
 
 ### 4.1 Dataset: NWPU-RESISC45
 
-| Thông tin | Giá trị |
-|-----------|---------|
-| **Tổng ảnh** | 31,500 |
-| **Classes** | 45 (airport, beach, bridge, forest, ...) |
-| **Resolution** | 256×256 pixels |
-| **Train/Test** | 80% / 20% |
+| Property | Value |
+|----------|-------|
+| Total images | 31,500 |
+| Classes | 45 |
+| Images/class | 700 |
+| Resolution | 256×256 |
+| **Train** | 25,200 (80%) |
+| **Val** | 3,150 (10%) |
+| **Test** | 3,150 (10%) |
 
-**45 Classes viễn thám:**
+**45 Classes:**
 ```
 airplane, airport, baseball_diamond, basketball_court, beach,
-bridge, chaparral, church, circular_farmland, cloud, ...
+bridge, chaparral, church, circular_farmland, cloud,
+commercial_area, dense_residential, desert, forest, freeway,
+golf_course, ground_track_field, harbor, industrial_area,
+intersection, island, lake, meadow, medium_residential,
+mobile_home_park, mountain, overpass, palace, parking_lot,
+railway, railway_station, rectangular_farmland, river,
+roundabout, runway, sea_ice, ship, snowberg, sparse_residential,
+stadium, storage_tank, tennis_court, terrace, thermal_power_station,
+wetland
 ```
 
-### 4.2 Thiết lập
+### 4.2 Training Setup
 
-| Parameter | Giá trị |
-|-----------|---------|
-| Batch size | 8 (accumulation 4 → effective 32) |
-| Epochs | 30 |
-| Learning rate | 1e-4 (head), 1e-5 (backbone) |
-| Hash bits | 64 |
-| Optimizer | AdamW |
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Batch size | 32 (8×4 accumulation) | Fit 4GB VRAM |
+| Epochs | 30 | Với early stopping |
+| LR backbone | 1e-5 | Fine-tune pretrained |
+| LR head | 1e-4 | Train from scratch |
+| Optimizer | AdamW | Standard for transformers |
+| Scheduler | CosineAnnealing | Smooth decay |
+| λ_quant | 0.0001 | From CSQ paper |
 
 ### 4.3 Experiments
 
-#### Experiment 1: Baseline với ViT
+#### Exp 1: Baseline (ViT)
 
 ```bash
 python train_nwpu.py --model vit --hash-bit 64 --epochs 30
 ```
 
-**Mục tiêu:** Xây dựng hệ thống CBIR hoạt động, đạt mAP ≥ 0.65
+**Output:** Baseline mAP để compare
 
-#### Experiment 2: So sánh ViT vs DINOv2 (Optional)
+---
 
-```bash
-# ViT-B/32 (ImageNet pretrained)
-python train_nwpu.py --model vit --epochs 30
-
-# DINOv2-S/14 (142M images pretrained)
-python train_nwpu.py --model dinov3 --epochs 30
-```
-
-**Mục tiêu:** Xem backbone nào phù hợp hơn cho ảnh viễn thám
-
-#### Experiment 3: Hash bits ablation (Optional)
+#### Exp 2: Backbone Comparison (RQ1)
 
 ```bash
-python train_nwpu.py --model vit --hash-bit 16
-python train_nwpu.py --model vit --hash-bit 32
-python train_nwpu.py --model vit --hash-bit 64
-python train_nwpu.py --model vit --hash-bit 128
+# ViT-B/32
+python train_nwpu.py --model vit --hash-bit 64 --epochs 30
+
+# DINOv2-S/14
+python train_nwpu.py --model dinov3 --hash-bit 64 --epochs 30
 ```
 
-**Mục tiêu:** Xác định số bits tối ưu (trade-off accuracy vs storage)
+**Analysis:**
+1. So sánh mAP, P@10, P@50
+2. Visualize attention maps (cả 2 models trên cùng 1 ảnh)
+3. Compare training curves
+
+---
+
+#### Exp 3: Hash Bits Ablation (RQ2)
+
+```bash
+python run_ablation.py --experiment hash_bits
+```
+
+Chạy với 16, 32, 64, 128 bits.
+
+**Expected output:**
+
+| Bits | mAP | ΔmAP | Storage | Speed |
+|------|-----|------|---------|-------|
+| 16 | ? | -baseline | 2B | 1.0x |
+| 32 | ? | ? | 4B | ~1.0x |
+| 64 | baseline | 0 | 8B | ~1.0x |
+| 128 | ? | ? | 16B | ~0.9x |
+
+---
+
+#### Exp 4: Failure Analysis (RQ3)
+
+```bash
+python visualize_analysis.py --checkpoint ./checkpoints/best_model.pth --analyze-failures
+```
+
+**Output:**
+1. Confusion matrix heatmap
+2. Top-10 confused class pairs
+3. Per-class mAP bar chart
+4. Sample failure cases with retrieved results
+
+---
 
 ### 4.4 Metrics
 
-| Metric | Công thức | Ý nghĩa |
-|--------|-----------|---------|
-| **mAP** | Mean Average Precision | Độ chính xác tổng thể |
-| **P@K** | Precision at K | % relevant trong top-K |
-
-### 4.5 Kết quả mong đợi
-
-| Model | mAP (64-bit) | Ghi chú |
-|-------|--------------|---------|
-| ViT-B/32 | 0.65 - 0.70 | Baseline |
-| DINOv2-S/14 | 0.68 - 0.73 | Pretrained tốt hơn? |
+| Metric | Formula | Use |
+|--------|---------|-----|
+| **mAP** | Mean of AP over all queries | Overall performance |
+| **P@K** | Relevant in top-K / K | Practical relevance |
+| **Confusion pairs** | Top co-occurrence in mistakes | Failure analysis |
 
 ---
 
 ## 5. HƯỚNG DẪN CHẠY CODE
 
-### 5.1 Cài đặt
-
-```bash
-# Clone và cài dependencies
-cd "Information Retrieval"
-pip install -r requirements.txt
-```
-
-### 5.2 Cấu trúc thư mục
+### 5.1 Cấu trúc
 
 ```
 Information Retrieval/
-├── train_nwpu.py         # 🔥 Script training chính
-├── src/
-│   ├── model.py          # ViT_Hashing model
-│   ├── loss.py           # CSQ Loss
-│   └── research/
-│       └── dinov3_hashing.py  # DINOv2 backbone (optional)
-├── data/
-│   └── archive/Dataset/  # NWPU-RESISC45
-└── checkpoints/          # Saved models
+├── experiments/                # Training & Analysis scripts
+│   ├── train.py                # Main training script
+│   ├── ablation.py             # Ablation study runner
+│   ├── evaluate.py             # Model evaluation
+│   └── visualize.py            # Analysis & visualization
+├── src/                        # Source code
+│   ├── models/                 # Model architectures
+│   │   ├── vit_hashing.py      # ViT + Hashing head
+│   │   └── dinov2_hashing.py   # DINOv2 + Hashing head
+│   ├── losses/                 # Loss functions
+│   │   └── csq_loss.py         # Central Similarity Quantization
+│   ├── data/                   # Data loading
+│   │   └── loaders.py          # Dataset loaders
+│   └── utils/                  # Utilities
+│       ├── metrics.py          # Evaluation metrics
+│       └── pruning.py          # Token pruning (optional)
+├── scripts/                    # Utility scripts
+│   ├── download_dataset.py     # Download datasets
+│   ├── download_nwpu.py        # Download NWPU-RESISC45
+│   └── download_weights.py     # Download pretrained weights
+├── docs/                       # Documentation
+├── data/archive/Dataset/       # NWPU-RESISC45 dataset
+├── checkpoints/                # Saved models
+└── results/                    # Output results
 ```
 
-### 5.3 Training
+### 5.2 Commands
 
 ```bash
-# Train cơ bản với ViT
-python train_nwpu.py --model vit --epochs 30
+# Setup
+pip install -r requirements.txt
 
-# Quick test (3 epochs)
-python train_nwpu.py --quick
+# 1. Quick test
+python experiments/train.py --quick
 
-# So sánh với DINOv2 (optional)
-python train_nwpu.py --model dinov3 --epochs 30
+# 2. Full experiments
+python experiments/train.py --model vit --epochs 30
+python experiments/train.py --model dinov3 --epochs 30
 
-# Nếu GPU yếu (4GB VRAM)
-python train_nwpu.py --batch-size 4 --accumulation-steps 8
+# 3. Ablation
+python experiments/ablation.py --all
+
+# 4. Evaluation
+python experiments/evaluate.py --checkpoint ./checkpoints/best_model.pth
+
+# 5. Analysis
+python experiments/visualize.py --checkpoint ./checkpoints/best_model_nwpu_vit.pth
 ```
 
-### 5.4 Arguments
+### 5.3 Key Arguments
 
-| Argument | Default | Mô tả |
-|----------|---------|-------|
-| `--model` | `vit` | `vit` (ViT-B/32) hoặc `dinov3` (DINOv2) |
-| `--hash-bit` | `64` | Số bits: 16, 32, 64, 128 |
-| `--epochs` | `30` | Số epochs training |
-| `--batch-size` | `8` | Batch size |
-| `--lr` | `1e-4` | Learning rate |
-| `--quick` | - | Quick test mode (3 epochs) |
+| Argument | Default | Options |
+|----------|---------|---------|
+| `--model` | `vit` | `vit`, `dinov3` |
+| `--hash-bit` | `64` | `16`, `32`, `64`, `128` |
+| `--epochs` | `30` | |
+| `--batch-size` | `8` | |
+| `--quick` | False | Quick test mode |
 
 ---
 
-## 6. KẾT QUẢ
+## 6. PHÂN TÍCH KẾT QUẢ
 
-### 6.1 Output sau training
+### 6.1 Kết quả dự kiến
 
-```
-./checkpoints/
-├── best_model_nwpu_vit.pth      # Model checkpoint
-└── training_history_vit.json    # Training logs
-```
+#### RQ1: Backbone Comparison
 
-### 6.2 Kết quả mẫu
+| Backbone | mAP | P@10 | Insight |
+|----------|-----|------|---------|
+| ViT-B/32 | ~0.68 | ~0.75 | Baseline, supervised ImageNet |
+| DINOv2-S/14 | ~0.72 | ~0.79 | **+4% mAP**, self-supervised |
 
-```
-[Training Complete]
-  Model: ViT-B/32 (64-bit hash)
-  Dataset: NWPU-RESISC45
-  
-  Best Validation mAP: 0.6823
-  Test mAP: 0.6756
-  
-  Checkpoint: ./checkpoints/best_model_nwpu_vit.pth
-```
+**Giải thích dự kiến:**
+- DINOv2 không bị bias về 1000 ImageNet categories
+- Self-supervised học features low-level tổng quát hơn
+- Patch 14×14 capture chi tiết tốt hơn 32×32
 
-### 6.3 So sánh (nếu chạy cả 2 models)
+#### RQ2: Hash Bits
 
-| Backbone | mAP | P@10 | Training time |
-|----------|-----|------|---------------|
-| ViT-B/32 | 0.68 | 0.75 | ~2h |
-| DINOv2-S/14 | 0.71 | 0.78 | ~2.5h |
+| Bits | mAP | Δ vs 64-bit | Storage |
+|------|-----|-------------|---------|
+| 16 | ~0.60 | -8% | 2B |
+| 32 | ~0.65 | -3% | 4B |
+| **64** | **~0.68** | **baseline** | **8B** |
+| 128 | ~0.69 | +1% | 16B |
 
-**Nhận xét:** DINOv2 pretrained trên nhiều data hơn nên có thể extract features tốt hơn cho domain-specific images như viễn thám.
+**Insight dự kiến:**
+- **64 bits là sweet spot**: tăng lên 128 chỉ +1% nhưng gấp đôi storage
+- 32 bits có thể đủ nếu cần compact hơn
+
+#### RQ3: Failure Analysis
+
+**Top confused pairs (dự kiến):**
+
+| Class A | Class B | Lý do |
+|---------|---------|-------|
+| airport | runway | Cả hai có đường băng dài |
+| dense_residential | medium_residential | Chỉ khác mật độ nhà |
+| circular_farmland | stadium | Cả hai có hình tròn |
+| railway | freeway | Cả hai là đường dài |
+
+### 6.2 Template phân tích
+
+#### A. Training Curves
+- Loss convergence của ViT vs DINOv2
+- Overfitting detection
+
+#### B. Attention Visualization
+- ViT focus vào đâu?
+- DINOv2 focus vào đâu?
+- Khác nhau như thế nào trên cùng 1 ảnh?
+
+#### C. t-SNE của Hash Codes
+- Các class có cluster rõ không?
+- Classes nào overlap?
+
+#### D. Retrieval Examples
+- Top-5 retrieved images cho success cases
+- Top-5 retrieved images cho failure cases
+
+---
+
+## 7. KẾT LUẬN
+
+### 7.1 Đóng góp
+
+1. **Hệ thống CBIR hoàn chỉnh** cho ảnh viễn thám
+2. **Evidence-based recommendation** về backbone (ViT vs DINOv2)
+3. **Practical guidance** về hash bits cho dataset tương tự
+4. **Failure analysis framework** có thể áp dụng cho domains khác
+
+### 7.2 Findings chính (Expected)
+
+| Finding | Implication |
+|---------|-------------|
+| DINOv2 > ViT (+4% mAP) | Self-supervised phù hợp hơn cho domain-specific |
+| 64 bits là đủ | Không cần 128+ bits cho 45-class retrieval |
+| Airport↔Runway confused | Cần visual cues khác ngoài layout |
+
+### 7.3 Limitations
+
+- Single dataset (NWPU-RESISC45 only)
+- Không so sánh với CNN baselines (ResNet)
+- Fixed resolution 224×224
+
+### 7.4 Future Work
+
+- Cross-dataset evaluation (e.g., train NWPU, test UC Merced)
+- Multi-scale features
+- Attention-based pooling
 
 ---
 
 ## 📚 TÀI LIỆU THAM KHẢO
 
-1. Dosovitskiy et al. (2020). "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale."
-2. Oquab et al. (2023). "DINOv2: Learning Robust Visual Features without Supervision."
-3. Yuan et al. (2020). "Central Similarity Quantization for Efficient Image and Video Retrieval."
+1. Dosovitskiy et al. (2020). "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale." ICLR 2021.
+
+2. Oquab et al. (2023). "DINOv2: Learning Robust Visual Features without Supervision." CVPR 2024.
+
+3. Yuan et al. (2020). "Central Similarity Quantization for Efficient Image and Video Retrieval." CVPR 2020.
+
+4. Cheng et al. (2017). "Remote Sensing Image Scene Classification: Benchmark and State of the Art." Proc. IEEE.
 
 ---
 
 ## 👨‍🎓 THÔNG TIN
 
+- **Bậc học:** Thạc sĩ
 - **Môn học:** Truy vấn Thông tin Hình ảnh
-- **Nội dung:** Xây dựng hệ thống CBIR cho ảnh viễn thám
+- **Dataset:** NWPU-RESISC45 (31,500 ảnh viễn thám)
 - **Phương pháp:** ViT + Deep Hashing
 
 ---
 
 *Cập nhật: Tháng 3/2026*
-
+

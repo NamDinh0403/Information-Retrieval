@@ -36,10 +36,10 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-# Add src to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.model import ViT_Hashing
+from src.models.vit_hashing import ViT_Hashing
 
 
 # ============================================================

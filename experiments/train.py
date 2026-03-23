@@ -38,16 +38,18 @@ import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
 import numpy as np
 
-# Add src to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Basic model
-from src.model import ViT_Hashing
-from src.loss import CSQLoss
+# Models
+from src.models.vit_hashing import ViT_Hashing
+from src.models.dinov2_hashing import DINOv3Hashing, HashingHead
 
-# Research components
-from src.research.dinov3_hashing import DINOv3Hashing, HashingHead
-from src.research.pruning import TokenPruner, AttentionBasedPruner, TokenMerger, analyze_pruning_effect
+# Loss
+from src.losses.csq_loss import CSQLoss
+
+# Utils (pruning - optional)
+from src.utils.pruning import TokenPruner, AttentionBasedPruner, TokenMerger, analyze_pruning_effect
 
 
 def check_gpu():
