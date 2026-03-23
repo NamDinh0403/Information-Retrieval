@@ -1,27 +1,24 @@
 """
-GPU Training for NWPU-RESISC45 Dataset with Full Research Pipeline
-===================================================================
-Fine-tune DINOv2/v3 Hashing trên bộ dữ liệu remote sensing.
+Training Script for Image Retrieval on NWPU-RESISC45
+=====================================================
+Hệ thống truy vấn ảnh viễn thám sử dụng ViT + Deep Hashing.
 
-Phương pháp: Kết hợp Vision Transformer (ViT) với Deep Hashing, 
-sử dụng DINOv2/v3 làm backbone và áp dụng Token Pruning để tối ưu hiệu năng.
+Phương pháp:
+    - ViT (Vision Transformer): Extract image features
+    - Deep Hashing (CSQ Loss): Chuyển features → binary hash codes
+    - Hamming Distance: Tìm kiếm nhanh
 
-Features:
-    - DINOv3Hashing: DINOv2/v3 backbone + Hashing Head
-    - Token Pruning: V-Pruner (Fisher Information) / Attention-based pruning
-    - GPU Optimization: Mixed Precision (AMP) + Gradient Accumulation
-    - CSQLoss: Central Similarity Quantization với Quantization Loss
+Models:
+    - vit: ViT-B/32 pretrained ImageNet (baseline, đơn giản)
+    - dinov3: DINOv2 pretrained 142M images (optional, so sánh)
 
 Tối ưu cho GTX 1650 4GB VRAM.
 
 Usage:
-    python train_nwpu.py                              # Default (DINOv3 + Pruning)
-    python train_nwpu.py --model dinov3               # Use DINOv3Hashing
-    python train_nwpu.py --model vit                  # Use basic ViT_Hashing
-    python train_nwpu.py --enable-pruning             # Enable Token Pruning
-    python train_nwpu.py --keep-ratio 0.7             # Keep 70% tokens
-    python train_nwpu.py --batch-size 4               # Nếu OOM
-    python train_nwpu.py --quick                      # Quick test
+    python train_nwpu.py                    # Train với ViT (default)
+    python train_nwpu.py --model dinov3     # Train với DINOv2 (so sánh)
+    python train_nwpu.py --quick            # Quick test (3 epochs)
+    python train_nwpu.py --batch-size 4     # Nếu OOM
 """
 
 import os
@@ -597,8 +594,8 @@ def main():
                        help='Directory to save checkpoints')
     
     # Model selection
-    parser.add_argument('--model', type=str, default='dinov3', choices=['dinov3', 'vit'],
-                       help='Model type: dinov3 (DINOv3Hashing) or vit (basic ViT_Hashing)')
+    parser.add_argument('--model', type=str, default='vit', choices=['vit', 'dinov3'],
+                       help='Model type: vit (ViT_Hashing baseline) or dinov3 (DINOv2 backbone)')
     parser.add_argument('--dinov3-variant', type=str, default='vit_small_patch14_dinov2.lvd142m',
                        choices=[
                            'vit_small_patch14_dinov2.lvd142m',
@@ -606,7 +603,7 @@ def main():
                            'vit_large_patch14_dinov2.lvd142m',
                            'vit_base_patch16_224'
                        ],
-                       help='DINOv3 backbone variant')
+                       help='DINOv2 backbone variant (only for --model dinov3)')
     parser.add_argument('--pretrained', action='store_true', default=False,
                        help='Load pretrained DINOv2 weights (requires internet)')
     parser.add_argument('--freeze-backbone', action='store_true', default=False,
