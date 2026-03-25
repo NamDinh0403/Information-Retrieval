@@ -9,3 +9,5 @@ qdrant-client
 matplotlib
 seaborn
 Pillow
+kaggle  # For downloading NUS-WIDE dataset
+scipy
