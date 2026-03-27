@@ -11,3 +11,8 @@ seaborn
 Pillow
 kaggle  # For downloading NUS-WIDE dataset
 scipy
+ftfy           # Required by CLIP
+regex          # Required by CLIP
+
+# CLIP - install separately:
+# pip install git+https://github.com/openai/CLIP.git

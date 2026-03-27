@@ -64,10 +64,16 @@ def check_gpu():
     print(f"  VRAM Free: {(torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1024**3:.1f} GB")
     print(f"  CUDA Version: {torch.version.cuda}")
     print(f"  cuDNN Enabled: {torch.backends.cudnn.enabled}")
+    print(f"  PyTorch Version: {torch.__version__}")
     
     # Optimize settings cho GPU
     torch.backends.cudnn.benchmark = True  # Auto-tune convolutions
     torch.backends.cuda.matmul.allow_tf32 = True  # TF32 cho Ampere+
+    torch.backends.cudnn.allow_tf32 = True  # TF32 cho cuDNN
+    
+    # Check torch.compile availability (PyTorch 2.0+)
+    has_compile = hasattr(torch, 'compile')
+    print(f"  torch.compile: {'Available' if has_compile else 'Not available (PyTorch < 2.0)'}")
     
     return True
 
@@ -82,18 +88,24 @@ def get_nwpu_loaders(
     data_dir: str = './data/archive/Dataset',
     batch_size: int = 8,
     num_workers: int = 2,
-    val_split: float = 0.2
+    val_split: float = 0.2,
+    image_size: int = 224
 ) -> Tuple[DataLoader, DataLoader, DataLoader, List[str]]:
     """
     Load NWPU-RESISC45 với train/val/test split.
+    
+    Args:
+        image_size: Input image size (default 224, use 182 for faster DINOv2)
     
     Returns:
         train_loader, val_loader, test_loader, class_names
     """
     # Transforms
+    resize_size = int(image_size * 256 / 224)  # Scale accordingly
+    
     train_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.RandomCrop(224),
+        transforms.Resize(resize_size),
+        transforms.RandomCrop(image_size),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),  # Ảnh vệ tinh có thể xoay
         transforms.RandomRotation(15),
@@ -104,8 +116,8 @@ def get_nwpu_loaders(
     ])
     
     test_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.Resize(resize_size),
+        transforms.CenterCrop(image_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                            std=[0.229, 0.224, 0.225])
@@ -414,12 +426,22 @@ def train(args):
     if not check_gpu():
         print("[!] Tiếp tục với CPU (chậm hơn nhiều)")
     
+    # Determine optimal image size
+    # DINOv2 patch14: 224x224 = 256 tokens, 182x182 = 169 tokens (34% faster)
+    if args.model == 'dinov3' and not args.full_resolution:
+        image_size = args.image_size if args.image_size else 182  # Faster for DINOv2
+        print(f"\n[!] DINOv2 optimization: Using {image_size}x{image_size} input")
+        print(f"    Tokens: {(image_size // 14) ** 2} (vs 256 at 224x224)")
+    else:
+        image_size = args.image_size if args.image_size else 224
+    
     # Data
     print(f"\n[Data] Loading NWPU-RESISC45...")
     train_loader, val_loader, test_loader, class_names = get_nwpu_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        image_size=image_size
     )
     num_classes = len(class_names)
     print(f"  Classes: {num_classes}")
@@ -445,6 +467,11 @@ def train(args):
             hidden_dim=1024,
             dropout=0.5
         )
+        
+        # Apply torch.compile for PyTorch 2.0+ speedup (10-30% faster)
+        if args.use_compile and hasattr(torch, 'compile'):
+            print(f"  [Compile] Using torch.compile() for speedup...")
+            model = torch.compile(model, mode='reduce-overhead')
     else:
         # Basic ViT_Hashing
         model_name = 'vit_base_patch32_224' if args.patch_size == 32 else 'vit_base_patch16_224'
@@ -503,10 +530,14 @@ def train(args):
     # Config summary
     print(f"\n[Config Summary]")
     print(f"  Model: {args.model}")
+    print(f"  Image size: {image_size}x{image_size}")
     print(f"  Batch size: {args.batch_size}")
     print(f"  Accumulation: {args.accumulation_steps}")
     print(f"  Effective batch: {args.batch_size * args.accumulation_steps}")
     print(f"  Epochs: {args.epochs}")
+    if args.model == 'dinov3':
+        print(f"  torch.compile: {args.use_compile and hasattr(torch, 'compile')}")
+        print(f"  Freeze backbone: {args.freeze_backbone}")
     print(f"  Token Pruning: {'Enabled' if args.enable_pruning else 'Disabled'}")
     if args.enable_pruning:
         print(f"    - Method: {args.pruning_method}")
@@ -630,6 +661,14 @@ def main():
                        choices=['fisher', 'attention'],
                        help='Pruning method: fisher (V-Pruner) or attention (learnable)')
     
+    # Speed optimizations (DINOv2)
+    parser.add_argument('--image-size', type=int, default=None,
+                       help='Input image size (default: 224 for ViT, 182 for DINOv2)')
+    parser.add_argument('--full-resolution', action='store_true', default=False,
+                       help='Use full 224x224 resolution for DINOv2 (slower but may be more accurate)')
+    parser.add_argument('--use-compile', action='store_true', default=False,
+                       help='Use torch.compile() for speedup (requires PyTorch 2.0+)')
+    
     # Loss
     parser.add_argument('--lambda-q', type=float, default=0.0001,
                        help='Quantization loss weight in CSQLoss')
@@ -653,6 +692,8 @@ def main():
     # Quick test
     parser.add_argument('--quick', action='store_true',
                        help='Quick test mode (3 epochs)')
+    parser.add_argument('--fast', action='store_true',
+                       help='Fast DINOv2 mode: smaller image + compile + freeze backbone')
     
     args = parser.parse_args()
     
@@ -661,6 +702,14 @@ def main():
         args.batch_size = 4
         args.eval_every = 1
         print("[Quick mode] epochs=3, batch_size=4")
+    
+    # Fast mode for DINOv2 - enable all optimizations
+    if args.fast and args.model == 'dinov3':
+        args.image_size = args.image_size or 182
+        args.use_compile = True
+        args.freeze_backbone = True
+        print("[Fast DINOv2 mode] image_size=182, compile=True, freeze_backbone=True")
+        print("  Expected speedup: ~3-5x faster training")
     
     os.makedirs(args.save_dir, exist_ok=True)
     
