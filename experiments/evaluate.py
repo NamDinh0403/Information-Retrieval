@@ -162,54 +162,55 @@ def compute_map(
     query_labels: torch.Tensor,
     database_codes: torch.Tensor,
     database_labels: torch.Tensor,
-    top_k: int = -1
+    top_k: int = -1,
+    query_batch_size: int = 256
 ) -> float:
     """
     Compute mean Average Precision (mAP).
-    
+    Processes queries in batches to avoid OOM on large datasets.
+
     Args:
         query_codes: [N_q, hash_bit]
         query_labels: [N_q]
         database_codes: [N_db, hash_bit]
         database_labels: [N_db]
         top_k: -1 for all
-    
+        query_batch_size: number of queries processed at once
+
     Returns:
         mAP score
     """
-    # Binary codes
-    query_binary = torch.sign(query_codes)
+    query_binary    = torch.sign(query_codes)
     database_binary = torch.sign(database_codes)
-    
-    # Hamming distance
-    hamming_dist = compute_hamming_distance(query_binary, database_binary)
-    
-    # Sort by distance (ascending)
-    sorted_indices = torch.argsort(hamming_dist, dim=1)
-    
-    # Compute AP for each query
+
     aps = []
-    
-    for i in range(len(query_labels)):
-        # Get sorted labels
-        sorted_labels = database_labels[sorted_indices[i]]
-        
-        # Ground truth: same class = relevant
-        relevant = (sorted_labels == query_labels[i]).float()
-        
-        if top_k > 0:
-            relevant = relevant[:top_k]
-        
-        # Compute AP
-        num_relevant = relevant.sum().item()
-        if num_relevant == 0:
-            continue
-        
-        cumsum = torch.cumsum(relevant, dim=0)
-        precision_at_k = cumsum / torch.arange(1, len(relevant) + 1, dtype=torch.float)
-        ap = (precision_at_k * relevant).sum() / num_relevant
-        aps.append(ap.item())
-    
+    n_queries = len(query_labels)
+
+    for start in range(0, n_queries, query_batch_size):
+        end = min(start + query_batch_size, n_queries)
+        q_batch  = query_binary[start:end]    # [B, hash_bit]
+        ql_batch = query_labels[start:end]    # [B]
+
+        # Hamming distance for this batch only: [B, N_db]
+        dist_batch = compute_hamming_distance(q_batch, database_binary)
+        sorted_indices = torch.argsort(dist_batch, dim=1)
+
+        for i in range(len(ql_batch)):
+            sorted_labels = database_labels[sorted_indices[i]]
+            relevant = (sorted_labels == ql_batch[i]).float()
+
+            if top_k > 0:
+                relevant = relevant[:top_k]
+
+            num_relevant = relevant.sum().item()
+            if num_relevant == 0:
+                continue
+
+            cumsum = torch.cumsum(relevant, dim=0)
+            prec   = cumsum / torch.arange(1, len(relevant) + 1, dtype=torch.float)
+            ap     = (prec * relevant).sum() / num_relevant
+            aps.append(ap.item())
+
     return np.mean(aps) if aps else 0.0
 
 
@@ -218,50 +219,46 @@ def compute_precision_recall_at_k(
     query_labels: torch.Tensor,
     database_codes: torch.Tensor,
     database_labels: torch.Tensor,
-    k_values: List[int] = [1, 5, 10, 20, 50, 100]
+    k_values: List[int] = [1, 5, 10, 20, 50, 100],
+    query_batch_size: int = 256
 ) -> Dict[str, Dict[int, float]]:
     """
     Compute Precision@K và Recall@K.
+    Processes queries in batches to avoid OOM.
     """
-    # Binary codes
-    query_binary = torch.sign(query_codes)
+    query_binary    = torch.sign(query_codes)
     database_binary = torch.sign(database_codes)
-    
-    # Hamming distance
-    hamming_dist = compute_hamming_distance(query_binary, database_binary)
-    
-    # Sort by distance
-    sorted_indices = torch.argsort(hamming_dist, dim=1)
-    
-    # Results
+    max_k = max(k_values)
+
     precision_at_k = defaultdict(list)
-    recall_at_k = defaultdict(list)
-    
-    for i in range(len(query_labels)):
-        sorted_labels = database_labels[sorted_indices[i]]
-        relevant = (sorted_labels == query_labels[i]).float()
-        total_relevant = (database_labels == query_labels[i]).sum().item()
-        
-        for k in k_values:
-            if k > len(relevant):
-                continue
-            
-            relevant_in_k = relevant[:k].sum().item()
-            
-            # Precision@K = relevant_in_k / k
-            precision_at_k[k].append(relevant_in_k / k)
-            
-            # Recall@K = relevant_in_k / total_relevant
-            if total_relevant > 0:
-                recall_at_k[k].append(relevant_in_k / total_relevant)
-    
-    # Average
-    results = {
+    recall_at_k    = defaultdict(list)
+    n_queries = len(query_labels)
+
+    for start in range(0, n_queries, query_batch_size):
+        end = min(start + query_batch_size, n_queries)
+        q_batch  = query_binary[start:end]
+        ql_batch = query_labels[start:end]
+
+        dist_batch     = compute_hamming_distance(q_batch, database_binary)
+        sorted_indices = torch.argsort(dist_batch, dim=1)
+
+        for i in range(len(ql_batch)):
+            sorted_labels  = database_labels[sorted_indices[i]]
+            relevant       = (sorted_labels == ql_batch[i]).float()
+            total_relevant = (database_labels == ql_batch[i]).sum().item()
+
+            for k in k_values:
+                if k > len(relevant):
+                    continue
+                relevant_in_k = relevant[:k].sum().item()
+                precision_at_k[k].append(relevant_in_k / k)
+                if total_relevant > 0:
+                    recall_at_k[k].append(relevant_in_k / total_relevant)
+
+    return {
         'precision': {k: np.mean(v) for k, v in precision_at_k.items()},
-        'recall': {k: np.mean(v) for k, v in recall_at_k.items()}
+        'recall':    {k: np.mean(v) for k, v in recall_at_k.items()},
     }
-    
-    return results
 
 
 def compute_precision_recall_curve(

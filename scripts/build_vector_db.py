@@ -95,7 +95,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> Tuple[nn.Module, d
     """Load finetuned model from checkpoint."""
     print(f"[*] Loading model from {checkpoint_path}")
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Get model config from checkpoint
     hash_bit = checkpoint.get('hash_bit', 64)
@@ -106,7 +106,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> Tuple[nn.Module, d
     
     # Build model
     if model_type == 'vit':
-        model = ViT_Hashing(hash_bit=hash_bit, num_classes=num_classes)
+        model = ViT_Hashing(hash_bit=hash_bit)
     elif model_type in ['dinov2', 'dinov3']:
         model = DINOv3Hashing(hash_bit=hash_bit, num_classes=num_classes)
     else:

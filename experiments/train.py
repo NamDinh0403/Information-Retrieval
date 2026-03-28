@@ -127,18 +127,22 @@ def get_nwpu_loaders(
     train_path = os.path.join(data_dir, 'train', 'train')
     test_path = os.path.join(data_dir, 'test', 'test')
     
-    # Load full train set
-    full_train = ImageFolder(train_path, transform=train_transform)
-    class_names = full_train.classes
+    # Load full train set - need separate datasets for train/val transforms
+    full_train_aug = ImageFolder(train_path, transform=train_transform)
+    full_train_clean = ImageFolder(train_path, transform=test_transform)
+    class_names = full_train_aug.classes
     num_classes = len(class_names)
     
-    # Split train/val
-    val_size = int(len(full_train) * val_split)
-    train_size = len(full_train) - val_size
-    train_dataset, val_dataset = random_split(
-        full_train, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
+    # Split indices (same split for both)
+    val_size = int(len(full_train_aug) * val_split)
+    train_size = len(full_train_aug) - val_size
+    indices = torch.randperm(len(full_train_aug), generator=torch.Generator().manual_seed(42)).tolist()
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
+    
+    from torch.utils.data import Subset
+    train_dataset = Subset(full_train_aug, train_indices)   # augmented
+    val_dataset = Subset(full_train_clean, val_indices)     # clean (no augmentation)
     
     # Test set
     test_dataset = ImageFolder(test_path, transform=test_transform)
@@ -457,6 +461,10 @@ def train(args):
         model_name_dinov3 = args.dinov3_variant
         print(f"  Type: DINOv3Hashing")
         print(f"  Backbone: {model_name_dinov3}")
+        if not args.pretrained:
+            print(f"  [WARNING] pretrained=False: backbone is randomly initialized.")
+            print(f"  [WARNING] mAP sẽ rất thấp (~0.02) cho nhiều epoch đầu!")
+            print(f"  [WARNING] Thêm --pretrained để load ImageNet weights.")
         
         model = DINOv3Hashing(
             model_name=model_name_dinov3,
@@ -468,10 +476,15 @@ def train(args):
             dropout=0.5
         )
         
-        # Apply torch.compile for PyTorch 2.0+ speedup (10-30% faster)
+        # Apply torch.compile for PyTorch 2.0+ speedup
         if args.use_compile and hasattr(torch, 'compile'):
             print(f"  [Compile] Using torch.compile() for speedup...")
-            model = torch.compile(model, mode='reduce-overhead')
+            try:
+                # 'default' mode works on all GPUs, 'reduce-overhead' needs more SMs
+                model = torch.compile(model, mode='default')
+            except Exception as e:
+                print(f"  [Compile] Failed: {e}")
+                print(f"  [Compile] Continuing without compilation...")
     else:
         # Basic ViT_Hashing
         model_name = 'vit_base_patch32_224' if args.patch_size == 32 else 'vit_base_patch16_224'
@@ -494,10 +507,12 @@ def train(args):
     print(f"\n[Loss] CSQLoss")
     criterion = CSQLoss(
         hash_bit=args.hash_bit,
-        num_classes=num_classes,  # 45 classes!
-        lambda_q=args.lambda_q
+        num_classes=num_classes,
+        lambda_q=args.lambda_q,
+        lambda_b=args.lambda_b
     )
     print(f"  lambda_q (Quantization): {args.lambda_q}")
+    print(f"  lambda_b (Balance):      {args.lambda_b}")
     
     # Optimizer với differential learning rates
     print(f"\n[Optimizer] AdamW với differential LR")
@@ -509,9 +524,22 @@ def train(args):
     print(f"  Head LR: {args.lr}")
     print(f"  Weight decay: {args.weight_decay}")
     
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-6
+    # Warmup + CosineAnnealing: warmup 3 epochs giúp ổn định early training
+    warmup_epochs = min(3, args.epochs // 5)
+    def warmup_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        return 1.0
+    warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_lambda)
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(args.epochs - warmup_epochs, 1), eta_min=1e-6
     )
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs]
+    )
+    print(f"  LR warmup: {warmup_epochs} epochs")
     
     # Trainer với pruning support
     print(f"\n[Trainer] Creating trainer...")
@@ -637,8 +665,10 @@ def main():
                            'vit_base_patch16_224'
                        ],
                        help='DINOv2 backbone variant (only for --model dinov3)')
-    parser.add_argument('--pretrained', action='store_true', default=False,
-                       help='Load pretrained DINOv2 weights (requires internet)')
+    parser.add_argument('--pretrained', action='store_true', default=True,
+                       help='Load pretrained DINOv2 weights (requires internet, default: True)')
+    parser.add_argument('--no-pretrained', dest='pretrained', action='store_false',
+                       help='Disable pretrained weights for DINOv2 (not recommended)')
     parser.add_argument('--freeze-backbone', action='store_true', default=False,
                        help='Freeze backbone weights during training')
     parser.add_argument('--gram-anchoring', action='store_true', default=False,
@@ -670,8 +700,10 @@ def main():
                        help='Use torch.compile() for speedup (requires PyTorch 2.0+)')
     
     # Loss
-    parser.add_argument('--lambda-q', type=float, default=0.0001,
-                       help='Quantization loss weight in CSQLoss')
+    parser.add_argument('--lambda-q', type=float, default=0.001,
+                       help='Quantization loss weight (pushes output to {-1,+1})')
+    parser.add_argument('--lambda-b', type=float, default=0.1,
+                       help='Balance loss weight (forces each bit to be 50/50)')
     
     # Training
     parser.add_argument('--epochs', type=int, default=30,
