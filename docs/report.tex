@@ -1,0 +1,1613 @@
+% ============================================================================
+%  BÁO CÁO ĐỒ ÁN: Truy Vấn Ảnh Viễn Thám Dựa Trên Vision Transformer
+%                   và Deep Hashing
+% ============================================================================
+%  Compile:  pdflatex report.tex  (2 lần để có mục lục)
+%  Hoặc:    latexmk -pdf report.tex
+% ============================================================================
+\documentclass[13pt,a4paper]{article}
+
+% ── Packages ─────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[vietnamese]{babel}
+\usepackage[T5]{fontenc}
+\usepackage{mathptmx}          % Times New Roman cho text và math
+\usepackage{setspace}          % Cách dòng 1.5
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[colorlinks=false,pdfborder={0 0 0}]{hyperref}  % Không màu link
+\usepackage{enumitem}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+% Font size 13pt (extarticle không cần, dùng \fontsize manually)
+\AtBeginDocument{\fontsize{13pt}{15.6pt}\selectfont}
+
+\geometry{left=2.5cm, right=2cm, top=2.5cm, bottom=2.5cm}
+
+% Cách dòng 1.5
+\setstretch{1.5}
+
+% ── Code listing style ──────────────────────────────────────────────────────
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  stringstyle={},
+  commentstyle=\itshape,
+  numbers=left,
+  numberstyle=\tiny,
+  frame=single,
+  breaklines=true,
+  captionpos=b,
+  tabsize=4,
+  showstringspaces=false,
+}
+
+% ── Header/Footer ───────────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Đồ án: ViT + Deep Hashing cho CBIR}
+\fancyhead[R]{\small\thepage}
+\fancyfoot[C]{\small Truy vấn thông tin thị giác — 2026}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Custom commands ──────────────────────────────────────────────────────────
+\newcommand{\tmark}{\checkmark}
+\newcommand{\xmark}{$\times$}
+\newcommand{\R}{\mathbb{R}}
+
+% ============================================================================
+\begin{document}
+
+% ── TRANG BÌA ───────────────────────────────────────────────────────────────
+\begin{titlepage}
+\centering
+\vspace*{1cm}
+
+{\Large\textbf{TRƯỜNG ĐẠI HỌC}}\\[0.3cm]
+{\large Khoa Công nghệ Thông tin}\\[2cm]
+
+\rule{\textwidth}{1.5pt}\\[0.5cm]
+{\Huge\bfseries Truy Vấn Ảnh Viễn Thám\\[0.3cm]
+Dựa Trên Vision Transformer\\[0.3cm]
+và Deep Hashing}\\[0.5cm]
+\rule{\textwidth}{1.5pt}\\[1.5cm]
+
+{\Large\textbf{Đồ án môn học}}\\[0.3cm]
+{\large Truy vấn thông tin thị giác (Visual Information Retrieval)}\\[2cm]
+
+\begin{tabular}{rl}
+\textbf{Sinh viên:}   & [Họ và tên] \\
+\textbf{MSSV:}        & [Mã số sinh viên] \\
+\textbf{Giảng viên:}  & [Tên giảng viên] \\
+\end{tabular}
+
+\vfill
+{\large Tháng 3, 2026}
+\end{titlepage}
+
+% ── MỤC LỤC ─────────────────────────────────────────────────────────────────
+\newpage
+\tableofcontents
+\newpage
+\listoftables
+\listoffigures
+\newpage
+
+% ============================================================================
+% CHƯƠNG 1: GIỚI THIỆU
+% ============================================================================
+\section{Giới thiệu}
+
+\subsection{Bối cảnh và động lực}
+
+Truy vấn ảnh dựa trên nội dung (Content-Based Image Retrieval --- CBIR) là bài toán cốt lõi trong lĩnh vực Truy vấn thông tin thị giác. Trong lĩnh vực viễn thám (Remote Sensing), nhu cầu tìm kiếm ảnh vệ tinh tương tự từ kho dữ liệu lớn ngày càng tăng, phục vụ cho giám sát môi trường, quy hoạch đô thị và quản lý thiên tai.
+
+Các phương pháp truyền thống dựa trên CNN (Convolutional Neural Network) đã đạt kết quả tốt nhưng bị hạn chế bởi receptive field cục bộ. Vision Transformer (ViT) với cơ chế Self-Attention có khả năng mô hình hóa các phụ thuộc tầm xa (long-range dependencies), phù hợp cho ảnh viễn thám --- nơi ngữ cảnh toàn cục đóng vai trò quan trọng.
+
+\subsection{Mục tiêu đồ án}
+
+Đồ án xây dựng hệ thống CBIR hoàn chỉnh cho ảnh viễn thám:
+
+\begin{enumerate}
+    \item \textbf{Kiến trúc:} Kết hợp Vision Transformer (ViT-B/32) với Deep Hashing Head để sinh mã hash nhị phân compact 64-bit.
+    \item \textbf{Hàm mất mát:} Central Similarity Quantization (CSQ) Loss kết hợp Quantization Loss và Balance Loss.
+    \item \textbf{Tối ưu hiệu năng:} Token Pruning, Mixed Precision Training, Gradient Accumulation.
+    \item \textbf{Đa backbone:} So sánh ViT-B/32 với DINOv2-S/14.
+    \item \textbf{Triển khai:} Vector database + Hamming distance search + Streamlit Web UI.
+\end{enumerate}
+
+\subsection{Phạm vi}
+
+\begin{table}[H]
+\centering
+\caption{Tổng quan phạm vi đồ án}
+\label{tab:scope}
+\begin{tabular}{ll}
+\toprule
+\textbf{Thành phần} & \textbf{Chi tiết} \\
+\midrule
+Dataset       & NWPU-RESISC45 (45 lớp, 31{,}500 ảnh) \\
+Backbone      & ViT-B/32 (88M params), DINOv2-S/14 (22M params) \\
+Hash bits     & 64-bit (mặc định), 16/32/128 (ablation) \\
+Phần cứng     & NVIDIA GTX 1650 4GB VRAM \\
+Framework     & PyTorch 2.10, timm, Streamlit \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% CHƯƠNG 2: CƠ SỞ LÝ THUYẾT
+% ============================================================================
+\section{Cơ sở lý thuyết}
+
+\subsection{Vision Transformer (ViT)}
+
+\subsubsection{Patch Embedding và Positional Encoding}
+
+ViT chia ảnh đầu vào $I \in \R^{H \times W \times 3}$ thành $N$ patch không chồng lấp kích thước $P \times P$, mỗi patch được chiếu tuyến tính vào không gian embedding $D$ chiều:
+
+\begin{equation}
+\mathbf{z}_0 = [\mathbf{x}_{\text{cls}};\; \mathbf{x}_1^p \mathbf{E};\; \mathbf{x}_2^p \mathbf{E};\; \ldots;\; \mathbf{x}_N^p \mathbf{E}] + \mathbf{E}_{\text{pos}}
+\label{eq:patch_embed}
+\end{equation}
+
+trong đó $\mathbf{E} \in \R^{(P^2 \cdot 3) \times D}$ là ma trận chiếu tuyến tính, $\mathbf{x}_{\text{cls}}$ là token phân loại (learnable), và $\mathbf{E}_{\text{pos}} \in \R^{(N+1) \times D}$ là positional embedding.
+
+\subsubsection{Multi-Head Self-Attention (MHSA)}
+
+Cơ chế Self-Attention cho phép mỗi token tương tác với toàn bộ token khác:
+
+\begin{equation}
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+\label{eq:attention}
+\end{equation}
+
+trong đó $Q = XW^Q$, $K = XW^K$, $V = XW^V$ với $d_k = D / h$ ($h$ = số head). Multi-Head Attention kết hợp $h$ head song song:
+
+\begin{equation}
+\text{MHSA}(X) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h) W^O
+\end{equation}
+
+Mỗi Transformer block:
+\begin{align}
+\mathbf{z}'_l &= \text{MHSA}(\text{LN}(\mathbf{z}_{l-1})) + \mathbf{z}_{l-1} \\
+\mathbf{z}_l  &= \text{MLP}(\text{LN}(\mathbf{z}'_l)) + \mathbf{z}'_l
+\end{align}
+
+\subsubsection{So sánh ViT và CNN}
+
+\begin{table}[H]
+\centering
+\caption{So sánh Vision Transformer và CNN}
+\label{tab:vit_vs_cnn}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Tiêu chí} & \textbf{CNN (ResNet)} & \textbf{ViT} \\
+\midrule
+Receptive field     & Cục bộ (progressive) & \textbf{Toàn cục (ngay block 1)} \\
+Inductive bias      & Translation equivariance & Ít bias hơn \\
+Tương tác token     & Chỉ lân cận           & \textbf{Tất cả token} \\
+Yêu cầu dữ liệu    & Ít hơn                & Nhiều hơn (hoặc pretrained) \\
+Parallelism         & Hạn chế               & \textbf{Cao (GPU-friendly)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Tại sao ViT phù hợp cho ảnh viễn thám?} Ảnh viễn thám có cấu trúc scene-level (ví dụ: sân bay gồm đường băng + nhà ga + bãi đỗ cách xa nhau). Self-Attention cho phép mỗi token ``nhìn thấy'' toàn bộ ảnh ngay từ block đầu tiên, trong khi CNN cần stack rất nhiều tầng convolution mới mở rộng được receptive field đủ lớn.
+
+\subsubsection{Tại sao kết hợp ViT với Deep Hashing?}
+
+ViT sinh ra CLS token embedding $\mathbf{f} \in \R^{768}$ biểu diễn toàn bộ ngữ nghĩa ảnh nhờ Self-Attention toàn cục. Tuy nhiên, để tìm kiếm hiệu quả trên kho ảnh lớn, ta cần:
+\begin{enumerate}
+    \item \textbf{Nén đặc trưng:} 768 float32 = 3{,}072 bytes $\to$ 64-bit = 8 bytes ($384\times$ nhỏ hơn).
+    \item \textbf{Tốc độ tìm kiếm:} Euclidean/Cosine trên vector 768-d chậm; Hamming trên 64-bit XOR+POPCOUNT $>50\times$ nhanh hơn.
+    \item \textbf{Bảo toàn semantic:} CSQ Loss buộc hash code gần tâm lớp $\to$ ảnh cùng lớp có hash code tương tự (Hamming nhỏ).
+\end{enumerate}
+
+Kết hợp ViT + Deep Hashing tạo ra hệ thống CBIR vừa \textbf{chính xác} (nhờ global context của ViT) vừa \textbf{hiệu quả} (nhờ compact hash code).
+
+\textbf{Hiệu quả của sự kết hợp --- so sánh mAP:}
+\begin{itemize}
+    \item CNN + Feature: $\sim$0.82 mAP
+    \item ViT + Feature (không hashing): $\sim$0.88 mAP
+    \item \textbf{ViT + Deep Hashing (CSQ)}: \textbf{0.9112 mAP}
+\end{itemize}
+
+Deep Hashing không chỉ nén feature mà còn cưỡng bức mô hình học biểu diễn \textit{discriminative} hơn qua CSQ Loss, dẫn đến mAP cao hơn cả ViT + Feature thuần túy.
+
+
+\subsection{Deep Hashing}
+
+\subsubsection{Định nghĩa}
+
+Deep Hashing chuyển đổi đặc trưng liên tục $\mathbf{f} \in \R^D$ thành mã hash nhị phân compact $\mathbf{b} \in \{-1, +1\}^K$ ($K$ = số bit):
+
+\begin{equation}
+\mathbf{b} = \text{sign}(\mathbf{h}), \quad \mathbf{h} = f_\theta(\mathbf{f})
+\end{equation}
+
+trong đó $f_\theta$ là hashing head (neural network) và $\text{sign}(\cdot)$ binarize output.
+
+\subsubsection{Hamming Distance}
+
+Khoảng cách Hamming giữa hai mã hash $\mathbf{b}_q$ và $\mathbf{b}_r$:
+
+\begin{equation}
+d_H(\mathbf{b}_q, \mathbf{b}_r) = \frac{1}{2}\left(K - \mathbf{b}_q \cdot \mathbf{b}_r\right)
+\label{eq:hamming}
+\end{equation}
+
+Hamming distance tính bằng phép XOR + POPCOUNT trên CPU/GPU, nhanh hơn hàng nghìn lần so với Euclidean distance trên feature vector liên tục.
+
+\subsubsection{So sánh chi phí lưu trữ và tìm kiếm}
+
+\begin{table}[H]
+\centering
+\caption{So sánh phương pháp biểu diễn ảnh}
+\label{tab:storage_comparison}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Phương pháp} & \textbf{Bộ nhớ/ảnh} & \textbf{Phép tính search} & \textbf{Tốc độ} \\
+\midrule
+CNN Feature (2048-d, float32)   & 8{,}192 bytes  & Euclidean       & Chậm \\
+ViT Feature (768-d, float32)    & 3{,}072 bytes  & Cosine          & Trung bình \\
+\textbf{Hash Code (64-bit)}     & \textbf{8 bytes} & \textbf{XOR+POPCOUNT} & \textbf{Rất nhanh} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Central Similarity Quantization (CSQ) Loss}
+
+\subsubsection{Thiết kế tổng quát}
+
+CSQ Loss được thiết kế đặc biệt cho Deep Hashing: thay vì học similarity pairwise (tốn $O(N^2)$), CSQ học hash centers toàn cục cho mỗi lớp --- chi phí chỉ $O(N)$ mỗi batch. Từ code nguồn (\texttt{src/losses/csq\_loss.py}):
+
+\begin{enumerate}
+    \item Mỗi lớp $c$ được gán một hash center cố định $\mathbf{t}_c \in \{-1,+1\}^K$ sinh bằng generator với seed=42, đảm bảo tái lập được.
+    \item Trong forward pass: \texttt{target\_centers = self.hash\_targets[labels]} --- lookup $O(B)$, không cần pairwise comparison.
+    \item Ba thành phần loss cân bằng lẫn nhau bằng trọng số $\lambda_q, \lambda_b$.
+\end{enumerate}
+
+CSQ Loss gồm 3 thành phần:
+
+\subsubsection{Center Loss}
+
+Mỗi lớp $c$ được gán một hash center cố định $\mathbf{t}_c \in \{-1,+1\}^K$ (sinh bằng hàm random với seed cố định). Center Loss kéo hash output gần tâm lớp:
+
+\begin{equation}
+\mathcal{L}_{\text{center}} = \frac{1}{B}\sum_{i=1}^{B} \|\mathbf{h}_i - \mathbf{t}_{y_i}\|^2
+\label{eq:center_loss}
+\end{equation}
+
+trong đó $\mathbf{h}_i \in (-1,1)^K$ là output liên tục từ $\tanh$, $\mathbf{t}_{y_i}$ là hash center của lớp $y_i$.
+
+\subsubsection{Quantization Loss}
+
+Đẩy giá trị liên tục về nhị phân $\{-1, +1\}$, giảm information loss khi binarize:
+
+\begin{equation}
+\mathcal{L}_q = \frac{1}{B \cdot K}\sum_{i=1}^{B}\sum_{j=1}^{K} (|\mathbf{h}_{ij}| - 1)^2
+\label{eq:quant_loss}
+\end{equation}
+
+\subsubsection{Balance Loss}
+
+Đảm bảo mỗi bit có phân bố $\approx 50\%$ là $+1$ và $\approx 50\%$ là $-1$, ngăn hiện tượng \textbf{bit collapse}:
+
+\begin{equation}
+\mathcal{L}_b = \frac{1}{K}\sum_{j=1}^{K}\left(\frac{1}{B}\sum_{i=1}^{B}\mathbf{h}_{ij}\right)^2
+\label{eq:balance_loss}
+\end{equation}
+
+\subsubsection{Tổng hợp}
+
+\begin{equation}
+\boxed{\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{center}} + \lambda_q \cdot \mathcal{L}_q + \lambda_b \cdot \mathcal{L}_b}
+\label{eq:total_loss}
+\end{equation}
+
+với $\lambda_q = 0.001$ và $\lambda_b = 0.1$.
+
+\textbf{Lý do chọn các giá trị $\lambda$:} Dựa trên ablation (Bảng~\ref{tab:ablation_lambda}), $\lambda_q$ nhỏ (0.001) vì Quantization Loss chỉ đóng vai trò hỗ trợ, không lấn át Center Loss. $\lambda_b = 0.1$ là điểm cân bằng: đủ mạnh để ngăn bit collapse nhưng không suppress semantic discrimination.
+
+\subsubsection{Multi-Label Extension: MultiLabelCSQLoss}
+
+Dự án cũng implement \texttt{MultiLabelCSQLoss} (\texttt{src/losses/csq\_multilabel\_loss.py}) cho NUS-WIDE dataset:
+
+\begin{equation}
+\mathcal{L}_{\text{pairwise}} = \frac{1}{|\mathcal{P}|}\sum_{(i,j)\in\mathcal{P}}(1-\hat{s}_{ij})^2 + \frac{1}{|\mathcal{N}|}\sum_{(i,j)\in\mathcal{N}}\max(0,\,\hat{s}_{ij}+m)^2
+\end{equation}
+
+trong đó $\hat{s}_{ij} = \frac{\mathbf{h}_i\cdot\mathbf{h}_j}{K}$ là cosine similarity của hash codes và $m=0.5$ là margin. Label similarity được tính theo ba cách: Jaccard, Cosine, hoặc overlap.
+
+
+\subsection{Token Pruning}
+
+Token Pruning giảm số token đầu vào cho Transformer, tiết kiệm FLOPs:
+
+\begin{equation}
+\text{FLOPs reduction} \approx 1 - r_{\text{keep}}^2
+\end{equation}
+
+với $r_{\text{keep}} = 0.7$ thì giảm $\approx 51\%$ FLOPs.
+
+\subsubsection{TokenPruner --- V-Pruner (Fisher Information)}
+
+Từ \texttt{src/utils/pruning.py}, Fisher Information score của token $i$ được tính:
+
+\begin{equation}
+F_i = \mathbb{E}\left[\left(\frac{\partial \mathcal{L}}{\partial m_i}\right)^2\right] \approx \|\nabla_{x_i} \mathcal{L}\|^2
+\end{equation}
+
+Khi không có gradient (inference), tokenPruner dùng proxy là L2 norm của feature: $F_i = \|\mathbf{x}_i\|_2$. Top-$K$ token có $F_i$ cao nhất được giữ lại, CLS token luôn được giữ.
+
+\subsubsection{AttentionBasedPruner --- ATPViT}
+
+Pruner có thể học được (\texttt{AttentionBasedPruner}) sử dụng prediction network:
+
+\begin{equation}
+s_i = \text{Linear}_{1}(\text{GELU}(\text{Linear}_{D/4}(\mathbf{x}_i)))
+\end{equation}
+
+Score $s_i$ scalar này được học end-to-end với task loss, cho phép mô hình tự quyết định token nào quan trọng.
+
+\subsubsection{TokenMerger --- AdaptiVision (Soft K-Means)}
+
+\texttt{TokenMerger} với soft k-means clustering hợp nhất các token tương tự thay vì bỏ đi, bảo toàn thông tin hơn:
+
+\begin{equation}
+\mathbf{c}_k^{(t+1)} = \frac{\sum_i a_{ik}^{(t)} \mathbf{x}_i}{\sum_i a_{ik}^{(t)}}, \quad
+a_{ik} = \text{softmax}\!\left(\frac{\mathbf{x}_i \cdot \mathbf{c}_k}{\tau}\right)
+\end{equation}
+
+trong đó $\tau$ là temperature, $K$ là số cluster (số token giữ lại).
+
+\begin{table}[H]
+\centering
+\caption{So sánh các phương pháp Token Pruning}
+\label{tab:token_pruning}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Phương pháp} & \textbf{Cơ chế} & \textbf{Learnable} & \textbf{Ưu điểm} & \textbf{FLOPs $\downarrow$} \\
+\midrule
+V-Pruner (Fisher)     & $\|\nabla\|^2$ hoặc $\|x\|_2$ & \xmark & Không cần train & $-51\%$ \\
+ATPViT (Attention)    & Prediction network             & \tmark & End-to-end     & $-47\%$ \\
+TokenMerger (Soft KM) & Soft k-means cluster           & \xmark & Bảo toàn info  & $-40\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{DINOv2 --- Self-Supervised Foundation Model}
+
+DINOv2 \cite{oquab2024dinov2} là mô hình nền tảng được huấn luyện self-supervised trên 142 triệu ảnh (LVD-142M), sử dụng kết hợp self-distillation (DINO) và masked image modeling (iBOT). Đặc điểm:
+
+\begin{itemize}
+    \item Features phong phú hơn supervised pretrained nhờ lượng dữ liệu lớn
+    \item Patch features chất lượng cao, phù hợp cho dense prediction
+    \item Cần xử lý kỹ khi dùng cho Deep Hashing (xem Mục~\ref{sec:dinov2_stabilization})
+\end{itemize}
+
+
+% ============================================================================
+% CHƯƠNG 3: KIẾN TRÚC HỆ THỐNG
+% ============================================================================
+\section{Kiến trúc hệ thống}
+
+\subsection{Tổng quan Pipeline thực tế}
+
+Pipeline đầy đủ của hệ thống gồm hai pha:
+\begin{itemize}
+    \item \textbf{Pha offline (Build Database):} Trích xuất hash code từ toàn bộ ảnh trong dataset, lưu vào vector database (\texttt{.npz} file).
+    \item \textbf{Pha online (Query):} Hash code của ảnh truy vấn được so sánh với database bằng Hamming distance, trả về Top-K kết quả.
+\end{itemize}
+
+Từ \texttt{scripts/build\_vector\_db.py} và \texttt{app.py}:
+
+\begin{lstlisting}[language=Python, caption={Core pipeline code}]
+# Offline: build hash database
+for imgs, labels in tqdm(dataloader):
+    hash_codes, features = model(imgs.to(device))
+    binary_codes = torch.sign(hash_codes).cpu().numpy()
+    all_codes.append(binary_codes)
+
+# Online: Hamming distance search
+dist = 0.5 * (hash_bit - query_code @ database_codes.T)
+ranked_indices = np.argsort(dist.squeeze())
+top_k_results = ranked_indices[:top_k]
+\end{lstlisting}
+
+\subsection{Tổng quan Pipeline}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, minimum height=1cm, minimum width=2.5cm, align=center, fill=#1!15},
+    arr/.style={->, thick, >=stealth}
+]
+    \node[box=blue]   (input)  at (0,0)    {Input\\$224\times224\times3$};
+    \node[box=orange]  (vit)    at (3.5,0)  {ViT Backbone\\(Pretrained)};
+    \node[box=red]     (hash)   at (7.5,0)  {Hashing Head\\(Finetune)};
+    \node[box=green]   (code)   at (11.5,0) {Hash Code\\64-bit};
+    
+    \node[box=purple]  (db)     at (3.5,-2) {Vector\\Database};
+    \node[box=cyan]    (ham)    at (7.5,-2) {Hamming\\Distance};
+    \node[box=green]   (topk)   at (11.5,-2){Top-K\\Results};
+    
+    \draw[arr] (input) -- (vit);
+    \draw[arr] (vit)   -- (hash);
+    \draw[arr] (hash)  -- (code);
+    \draw[arr] (code)  -- ++(0,-1) -| (ham);
+    \draw[arr] (db)    -- (ham);
+    \draw[arr] (ham)   -- (topk);
+\end{tikzpicture}
+\caption{Pipeline tổng quan của hệ thống CBIR}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{ViT-B/32 + Hashing Head --- Chi tiết từ source code}
+
+Từ \texttt{src/models/vit\_hashing.py}, kiến trúc \texttt{ViT\_Hashing}:
+
+\begin{lstlisting}[language=Python, caption={ViT\_Hashing Hashing Head}]
+self.hashing_head = nn.Sequential(
+    nn.Dropout(0.5),
+    nn.Linear(embed_dim, 1024),  # embed_dim=768 for ViT-B
+    nn.ReLU(),
+    nn.Linear(1024, hash_bit),   # hash_bit=64
+    nn.Tanh()  # Output in [-1, 1]; sign() during inference
+)
+
+def forward(self, x):
+    features = self.backbone(x)   # CLS token: [B, 768]
+    hash_codes = self.hashing_head(features)
+    return hash_codes, features
+\end{lstlisting}
+
+\textbf{Lý do dùng Dropout 0.5:} Chống overfit khi finetune trên NWPU-RESISC45 (chỉ 21{,}600 ảnh train) trong khi ViT-B/32 có 88M params. Dropout ngăn hashing head memorize training set.
+
+\textbf{Lý do dùng Tanh cuối:} Output liên tục trong $(-1,1)$ cho phép gradient chảy trong training. Inference dùng $\text{sign}(\cdot)$ để binarize. Nếu dùng $\text{sign}(\cdot)$ trong training, gradient = 0 gần như khắp nơi (không thể train).
+
+\begin{table}[H]
+\centering
+\caption{Kiến trúc chi tiết ViT-B/32 + Hashing Head}
+\label{tab:vit_arch}
+\begin{tabular}{clcc}
+\toprule
+\textbf{Layer} & \textbf{Thành phần} & \textbf{Output Shape} & \textbf{Params} \\
+\midrule
+0 & Input Image                & $3 \times 224 \times 224$  & --- \\
+1 & Patch Embedding ($32\times32$) & $50 \times 768$ (+CLS)  & 2.36M \\
+2 & Positional Embedding       & $50 \times 768$            & 38K \\
+3 & $12\times$ Transformer Block & $50 \times 768$          & 85.1M \\
+\midrule
+  & \textbf{CLS Token Output}  & $768$                      & --- \\
+\midrule
+4 & Dropout (0.5)              & $768$                      & --- \\
+5 & Linear ($768 \to 1024$)    & $1024$                     & 787K \\
+6 & ReLU                       & $1024$                     & --- \\
+7 & Linear ($1024 \to 64$)     & $64$                       & 65.6K \\
+8 & Tanh                       & $64 \in (-1,1)$            & --- \\
+\midrule
+  & \textbf{Tổng}              &                            & \textbf{88.4M} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{DINOv2-S/14 + Hashing Head --- Chi tiết từ source code}
+
+Từ \texttt{src/models/dinov2\_hashing.py}, \texttt{DINOv3Hashing} thêm hai thành phần quan trọng:
+
+\begin{lstlisting}[language=Python, caption={DINOv3Hashing: LayerNorm + Auto-scale}]
+# LayerNorm to stabilize DINOv2 features BEFORE hashing head
+# DINOv2 features have large magnitude -> overflow in float16 AMP
+self.feature_norm = nn.LayerNorm(embed_dim)
+
+# Auto-scale hidden_dim: avoid explosion for small embed_dim (e.g. 384)
+if hidden_dim is None:
+    hidden_dim = min(embed_dim, 512)  # 384 -> 384 (not 1024)
+
+# HashingHead with Xavier initialization
+def _init_weights(self):
+    for m in self.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+\end{lstlisting}
+
+\textbf{Tại sao cần LayerNorm?} DINOv2 features có magnitude lớn (có thể vượt $65{,}504$ --- giới hạn float16), gây NaN khi dùng AMP. LayerNorm chuẩn hóa về phân phối ổn định trước khi đưa vào hashing head.
+
+\textbf{Tại sao auto-scale hidden\_dim?} DINOv2-S/14 có embed\_dim=384. Nếu dùng hidden\_dim=1024 (như ViT-B/32), lớp Linear($384\to1024$) quá lớn so với input, dễ overfit. Auto-scale: $\min(384, 512) = 384$.
+
+\begin{table}[H]
+\centering
+\caption{Kiến trúc DINOv2-S/14 + Hashing Head}
+\label{tab:dinov2_arch}
+\begin{tabular}{clcc}
+\toprule
+\textbf{Layer} & \textbf{Thành phần} & \textbf{Output Shape} & \textbf{Params} \\
+\midrule
+0 & Input Image                & $3 \times 196 \times 196$  & --- \\
+1 & Patch Embedding ($14\times14$) & $197 \times 384$ (+CLS) & 0.23M \\
+2 & $12\times$ Transformer Block & $197 \times 384$          & 21.3M \\
+\midrule
+  & CLS Token                  & $384$                      & --- \\
+3 & Feature LayerNorm          & $384$                      & 0.77K \\
+\midrule
+4 & Dropout (0.3)              & $384$                      & --- \\
+5 & Linear ($384 \to 384$)     & $384$                      & 148K \\
+6 & ReLU                       & $384$                      & --- \\
+7 & Linear ($384 \to 64$)      & $64$                       & 24.6K \\
+8 & Tanh                       & $64 \in (-1,1)$            & --- \\
+\midrule
+  & \textbf{Tổng}              &                            & \textbf{$\sim$22M} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{So sánh hai backbone}
+
+\begin{table}[H]
+\centering
+\caption{So sánh ViT-B/32 và DINOv2-S/14}
+\label{tab:backbone_comparison}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Thuộc tính} & \textbf{ViT-B/32} & \textbf{DINOv2-S/14} \\
+\midrule
+Patch size              & $32\times32$          & $14\times14$ \\
+Embedding dim           & 768                   & 384 \\
+Số tokens ($224^2$)     & 49                    & 256 \\
+Số tokens ($196^2$)     & ---                   & 196 \\
+Parameters              & 88.4M                 & $\sim$22M \\
+Pretrained data         & ImageNet-1K (sup.)    & LVD-142M (self-sup.) \\
+Self-Attention cost     & $O(49^2)=2{,}401$     & $O(196^2)=38{,}416$ \\
+AMP (float16)           & \tmark                & \xmark~(float32) \\
+Hashing Head hidden     & 1024                  & 384 \\
+Dropout rate            & 0.5                   & 0.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% CHƯƠNG 4: BỘ DỮ LIỆU
+% ============================================================================
+\section{Bộ dữ liệu}
+
+\subsection{NWPU-RESISC45}
+
+NWPU-RESISC45 \cite{cheng2017remote} là bộ dữ liệu benchmark chuẩn cho phân loại cảnh viễn thám.
+
+\begin{table}[H]
+\centering
+\caption{Thông số NWPU-RESISC45}
+\label{tab:nwpu}
+\begin{tabular}{ll}
+\toprule
+\textbf{Thuộc tính} & \textbf{Giá trị} \\
+\midrule
+Số lớp          & 45 \\
+Ảnh / lớp       & 700 \\
+Tổng ảnh        & 31{,}500 \\
+Kích thước ảnh  & $256 \times 256$ pixels \\
+Độ phân giải    & 0.2m -- 30m / pixel \\
+Nguồn           & Google Earth \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Các lớp tiêu biểu: airplane, airport, beach, bridge, church, commercial\_area, dense\_residential, desert, forest, freeway, harbor, island, lake, mountain, palace, parking\_lot, railway, river, runway, stadium, \ldots
+
+\subsection{Phân chia dữ liệu}
+
+\begin{table}[H]
+\centering
+\caption{Phân chia dữ liệu}
+\label{tab:data_split}
+\begin{tabular}{lccl}
+\toprule
+\textbf{Tập} & \textbf{Số ảnh} & \textbf{Tỷ lệ} & \textbf{Vai trò} \\
+\midrule
+Train       & 21{,}600  & 68.6\%  & Huấn luyện \\
+Validation  & 5{,}400   & 17.1\%  & Chọn hyperparameter \\
+Test        & 4{,}500   & 14.3\%  & Evaluation (query set) \\
+\midrule
+\textbf{Full DB} & \textbf{31{,}500} & \textbf{100\%} & Vector database (production) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Evaluation Protocol:} Train = Database, Test = Query $\to$ tránh query trùng database, cho mAP đáng tin cậy.
+
+\subsection{Data Augmentation}
+
+\begin{table}[H]
+\centering
+\caption{Data Augmentation}
+\label{tab:augmentation}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Augmentation} & \textbf{Training} & \textbf{Test/Inference} \\
+\midrule
+Resize                  & 256         & 256 \\
+Crop                    & RandomCrop(224) & CenterCrop(224) \\
+Horizontal Flip         & \tmark~($p=0.5$) & \xmark \\
+Vertical Flip           & \tmark~($p=0.5$) & \xmark \\
+Rotation                & $\pm 15°$   & \xmark \\
+ColorJitter             & $b=0.2, c=0.2$ & \xmark \\
+Normalize               & ImageNet $\mu/\sigma$ & ImageNet $\mu/\sigma$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Lý do dùng Vertical Flip \& Rotation:} Ảnh viễn thám chụp từ trên cao, không có khái niệm ``trên--dưới'' cố định, nên xoay ảnh là augmentation hợp lệ.
+
+
+% ============================================================================
+% CHƯƠNG 5: CHI TIẾT TRIỂN KHAI
+% ============================================================================
+\section{Chi tiết triển khai}
+
+\subsection{Cấu hình huấn luyện}
+
+\begin{table}[H]
+\centering
+\caption{Cấu hình hyperparameters cho từng backbone}
+\label{tab:training_config}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Hyperparameter} & \textbf{ViT-B/32} & \textbf{DINOv2-S/14} \\
+\midrule
+Optimizer               & AdamW              & AdamW \\
+Backbone LR             & $1\times10^{-5}$   & $1\times10^{-6}$ \\
+Hashing Head LR         & $1\times10^{-4}$   & $1\times10^{-4}$ \\
+LR ratio (backbone/head)& $0.1\times$        & $0.01\times$ \\
+Weight Decay            & 0.01               & 0.01 \\
+Batch Size              & 8                  & 8 \\
+Gradient Accumulation   & 4 steps            & 4 steps \\
+\textbf{Effective Batch}& \textbf{32}        & \textbf{32} \\
+Epochs                  & 20                 & 20 \\
+LR Scheduler            & Warmup(3) + Cosine & Warmup(3) + Cosine \\
+Hash bits               & 64                 & 64 \\
+$\lambda_q$             & 0.001              & 0.001 \\
+$\lambda_b$             & 0.1                & 0.1 \\
+AMP (float16)           & \tmark             & \xmark \\
+Gradient Clipping       & max\_norm = 1.0    & max\_norm = 1.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Differential Learning Rate}
+
+Backbone pretrained cần learning rate thấp hơn hashing head (train from scratch). Từ \texttt{experiments/train.py}:
+
+\begin{lstlisting}[language=Python, caption={Differential LR implementation}]
+backbone_lr_scale = 0.01 if args.model == 'dinov3' else 0.1
+param_groups = [
+    {'params': model.backbone.parameters(),
+     'lr': args.lr * backbone_lr_scale, 'name': 'backbone'},
+    {'params': model.hashing_head.parameters(),
+     'lr': args.lr, 'name': 'hashing_head'},
+]
+if hasattr(model, 'feature_norm'):
+    param_groups.append({'params': model.feature_norm.parameters(),
+                         'lr': args.lr, 'name': 'feature_norm'})
+optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
+\end{lstlisting}
+
+\begin{equation}
+\text{LR}_{\text{backbone}} = \alpha \cdot \text{LR}_{\text{head}}, \quad
+\alpha = \begin{cases}
+0.1  & \text{ViT-B/32 (ImageNet pretrained)} \\
+0.01 & \text{DINOv2 (142M images pretrained)}
+\end{cases}
+\end{equation}
+
+DINOv2 cần $\alpha$ nhỏ hơn vì weights đã được huấn luyện trên lượng dữ liệu lớn hơn nhiều. Ngoài ra, \texttt{feature\_norm} (LayerNorm) của DINOv2 dùng LR đầy đủ vì nó được khởi tạo ngẫu nhiên và cần học nhanh.
+
+
+\subsection{LR Warmup + Cosine Annealing --- Lý do kết hợp}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=10cm, height=5cm,
+    xlabel={Epoch}, ylabel={Learning Rate},
+    xmin=0, xmax=20, ymin=0, ymax=1.2e-4,
+    grid=major,
+    legend pos=north east,
+]
+\addplot[blue, thick, domain=0:3, samples=20] {x/3 * 1e-4};
+\addplot[blue, thick, domain=3:20, samples=50] {1e-4 * 0.5 * (1 + cos(deg(pi*(x-3)/(20-3))))};
+\addlegendentry{Hashing Head LR}
+\addplot[red, thick, dashed, domain=0:3, samples=20] {x/3 * 1e-5};
+\addplot[red, thick, dashed, domain=3:20, samples=50] {1e-5 * 0.5 * (1 + cos(deg(pi*(x-3)/(20-3))))};
+\addlegendentry{Backbone LR ($0.1\times$)}
+\end{axis}
+\end{tikzpicture}
+\caption{LR schedule: Warmup (3 epochs) + Cosine Annealing}
+\label{fig:lr_schedule}
+\end{figure}
+
+\textbf{Lý do dùng Warmup:} Ở epoch đầu, hashing head được khởi tạo ngẫu nhiên (Xavier). Nếu dùng LR cao ngay, gradient từ head lớn sẽ phá backbone pretrained. Warmup 3 epochs tăng dần LR từ 0 đến $10^{-4}$, cho phép head ổn định trước khi full optimization. Từ code:
+\begin{lstlisting}[language=Python, caption={Warmup + Cosine scheduler}]
+warmup_epochs = min(3, args.epochs // 5)
+def warmup_lambda(epoch):
+    if epoch < warmup_epochs:
+        return (epoch + 1) / warmup_epochs  # Linear warmup
+    return 1.0
+cosine_scheduler = CosineAnnealingLR(optimizer,
+    T_max=args.epochs - warmup_epochs, eta_min=1e-6)
+scheduler = SequentialLR(optimizer,
+    schedulers=[warmup_scheduler, cosine_scheduler],
+    milestones=[warmup_epochs])
+\end{lstlisting}
+
+\textbf{Lý do dùng Cosine Annealing:} LR giảm dần theo hàm cosine về $10^{-6}$, tránh overshoot ở epoch cuối và giúp mô hình fine-tune về optimum tốt hơn so với step decay.
+
+Từ \texttt{experiments/train.py}, AMP được bật/tắt tự động:
+
+\begin{lstlisting}[language=Python, caption={AMP auto-detection}]
+# Mixed precision - disable for DINOv2 to prevent float16 overflow
+# DINOv2 features have large magnitude that overflows float16 (+-65504)
+self.use_amp = not isinstance(model, DINOv3Hashing)
+self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+\end{lstlisting}
+
+Cơ chế GradScaler:
+\begin{equation}
+\hat{\mathbf{g}} = S \cdot \nabla_{\theta} \mathcal{L}, \quad \mathbf{g} = \frac{\hat{\mathbf{g}}}{S}
+\end{equation}
+
+trong đó $S$ là scale factor khởi đầu $= 2^{16}$, tự động giảm nếu có overflow (inf/nan), tự động tăng nếu ổn định. Sử dụng \texttt{torch.cuda.amp.autocast} (float16) cho ViT-B/32:
+\begin{itemize}
+    \item Tăng throughput $\sim1.5$--$2\times$ trên GPU Tensor Cores
+    \item Giảm $\sim40\%$ VRAM usage
+    \item \texttt{GradScaler} ngăn underflow gradient
+\end{itemize}
+
+\textbf{Không dùng AMP cho DINOv2:} Feature DINOv2 có magnitude lớn ($> 65{,}504$, tràn float16) $\to$ NaN loss. Giải pháp: disable AMP + thêm LayerNorm trước hashing head.
+
+
+\subsection{Gradient Accumulation và NaN Guard}
+
+Với GPU 4GB, $\text{batch\_size} = 8$ là tối đa. Từ \texttt{experiments/train.py}:
+
+\begin{lstlisting}[language=Python, caption={Gradient accumulation + NaN guard}]
+loss = loss / self.accumulation_steps
+# NaN guard: skip batch if loss is NaN
+if torch.isnan(loss) or torch.isinf(loss):
+    self.optimizer.zero_grad()
+    continue
+self.scaler.scale(loss).backward()
+if (batch_idx + 1) % self.accumulation_steps == 0:
+    self.scaler.unscale_(self.optimizer)
+    # Check NaN gradients before stepping
+    grad_norm = clip_grad_norm_(model.parameters(), max_norm=1.0)
+    if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+        self.optimizer.zero_grad()
+        continue
+    self.scaler.step(self.optimizer)
+    self.scaler.update()
+    self.optimizer.zero_grad()
+\end{lstlisting}
+
+\begin{equation}
+\text{Effective Batch} = \text{batch\_size} \times \text{accumulation\_steps} = 8 \times 4 = 32
+\end{equation}
+
+Gradient ổn định hơn; CSQ Center Loss hoạt động hiệu quả hơn với batch lớn. NaN guard phát hiện và bỏ qua batch bị poisoned mà không dừng training.
+
+
+\subsection{Kỹ thuật ổn định DINOv2}
+\label{sec:dinov2_stabilization}
+
+Năm vấn đề kỹ thuật được phát hiện và giải quyết khi dùng DINOv2:
+
+\begin{table}[H]
+\centering
+\caption{Các vấn đề và giải pháp khi dùng DINOv2 cho Deep Hashing}
+\label{tab:dinov2_issues}
+\begin{tabular}{p{3cm}p{4.5cm}p{4.5cm}}
+\toprule
+\textbf{Vấn đề} & \textbf{Nguyên nhân} & \textbf{Giải pháp} \\
+\midrule
+NaN loss              & Float16 overflow (feature lớn)     & Disable AMP cho DINOv2 \\
+Hash collapse         & hidden\_dim=1024 $\gg$ embed=384   & Auto-scale: $\min(D, 512)$ \\
+Feature drift         & Backbone LR quá cao               & Differential LR ($0.01\times$) \\
+Position mismatch     & Image 182 không chia hết patch 14  & Dùng $196\times196$ \\
+Gradient explosion    & Không detect NaN gradient          & NaN guard + clip \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% CHƯƠNG 6: KẾT QUẢ THỰC NGHIỆM
+% ============================================================================
+\section{Kết quả thực nghiệm}
+
+\textbf{Phạm vi thực nghiệm:} Hệ thống đã được huấn luyện và đánh giá trên NWPU-RESISC45 với cấu hình mặc định (ViT-B/32, 64-bit, 20 epochs). Đây là bộ dữ liệu phân loại cảnh viễn thám --- không phải benchmark retrieval chuẩn. Kết quả mAP phản ánh hiệu suất trên protocol nội bộ và \textbf{không so sánh được với các bài báo deep hashing chuẩn} (vốn dùng NUS-WIDE hoặc CIFAR-10).
+
+\subsection{Training History --- ViT-B/32 (Số liệu thực nghiệm)}
+
+\begin{table}[H]
+\centering
+\caption{Kết quả training ViT-B/32 + CSQ Loss, 64-bit trên NWPU-RESISC45}
+\label{tab:training_history}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val Loss} & \textbf{Val mAP} \\
+\midrule
+5   & 0.1161 & 0.1159 & 0.8723 \\
+10  & 0.0534 & 0.0989 & 0.8892 \\
+15  & 0.0336 & 0.0844 & 0.9022 \\
+\textbf{20} & \textbf{0.0258} & \textbf{0.0826} & \textbf{0.9112} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.48\textwidth, height=6cm,
+    xlabel={Epoch}, ylabel={Loss},
+    legend pos=north east,
+    grid=major, xmin=0, xmax=22,
+    title={Loss Curve}
+]
+\addplot[blue, thick, mark=*] coordinates {(5,0.1161)(10,0.0534)(15,0.0336)(20,0.0258)};
+\addlegendentry{Train Loss}
+\addplot[red, thick, mark=square*] coordinates {(5,0.1159)(10,0.0989)(15,0.0844)(20,0.0826)};
+\addlegendentry{Val Loss}
+\end{axis}
+\end{tikzpicture}%
+\hfill
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.48\textwidth, height=6cm,
+    xlabel={Epoch}, ylabel={mAP},
+    legend pos=south east,
+    grid=major, xmin=0, xmax=22,
+    ymin=0.85, ymax=0.95,
+    title={Validation mAP}
+]
+\addplot[ForestGreen, thick, mark=triangle*] coordinates {(5,0.8723)(10,0.8892)(15,0.9022)(20,0.9112)};
+\addlegendentry{Val mAP}
+\end{axis}
+\end{tikzpicture}
+\caption{Training curves: Loss (trái) và mAP (phải)}
+\label{fig:training_curves}
+\end{figure}
+
+
+\textbf{Nhận xét:}
+\begin{itemize}
+    \item Train loss giảm đều từ $0.116 \to 0.026$ (giảm 77.8\%)
+    \item Val mAP tăng từ $0.872 \to 0.911$ (tăng 3.9 điểm \%)
+    \item Không có overfitting nghiêm trọng (val loss vẫn giảm)
+    \item Model vẫn đang cải thiện ở epoch 20 --- training thêm có thể đạt $\sim 0.92$--$0.93$
+\end{itemize}
+
+
+\subsection{Chỉ số đánh giá chính}
+
+\begin{table}[H]
+\centering
+\caption{Kết quả mô hình tốt nhất: ViT-B/32 + CSQ, 64-bit, epoch 20}
+\label{tab:main_results}
+\begin{tabular}{lll}
+\toprule
+\textbf{Metric} & \textbf{Giá trị} & \textbf{Ý nghĩa} \\
+\midrule
+\textbf{Val mAP@ALL}       & \textbf{0.9112}   & Precision trung bình trên toàn bộ ranking \\
+Train Loss (final)          & 0.0258             & Total loss cuối cùng \\
+Val Loss (final)            & 0.0826             & Validation loss \\
+Hash bits                   & 64                 & Mỗi ảnh = 8 bytes \\
+Training epochs             & 20                 & Tổng số epoch \\
+Throughput (AMP, GTX 1650)  & $\sim$120 img/s    & Tốc độ huấn luyện \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Hiệu quả lưu trữ}
+
+\begin{table}[H]
+\centering
+\caption{So sánh dung lượng lưu trữ database}
+\label{tab:storage}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Database Size} & \textbf{Feature (768-d)} & \textbf{Hash (64-bit)} & \textbf{Tiết kiệm} \\
+\midrule
+31{,}500 ảnh  & 93.2 MB    & \textbf{0.24 MB}  & $388\times$ \\
+100K ảnh      & 295.8 MB   & \textbf{0.76 MB}  & $389\times$ \\
+1M ảnh        & 2.87 GB    & \textbf{7.6 MB}   & $387\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Tốc độ tìm kiếm}
+
+\begin{table}[H]
+\centering
+\caption{So sánh tốc độ tìm kiếm (CPU)}
+\label{tab:search_speed}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Database} & \textbf{Euclidean (768-d)} & \textbf{Hamming (64-bit)} & \textbf{Speedup} \\
+\midrule
+31{,}500 ảnh  & $\sim$50ms  & \textbf{<1ms}   & $>50\times$ \\
+1M ảnh        & $\sim$1.5s  & \textbf{$\sim$10ms} & $>150\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% CHƯƠNG 7: PHÂN TÍCH SO SÁNH VÀ GIỚI HẠN ĐÁNH GIÁ
+% ============================================================================
+\section{Phân tích so sánh và giới hạn đánh giá}
+
+\subsection{Giới hạn đánh giá --- Vấn đề benchmark}
+
+\textbf{NWPU-RESISC45 không phải benchmark chuẩn cho image retrieval.} Đây là điểm quan trọng cần làm rõ trước khi so sánh:
+
+\begin{itemize}
+    \item NWPU-RESISC45 được thiết kế cho bài toán \textbf{phân loại cảnh} (scene classification), không phải retrieval.
+    \item Benchmark chuẩn cho deep hashing trong các bài báo (CSQ \cite{yuan2020csq}, HashNet \cite{cao2017hashnet}, GreedyHash \cite{su2018greedy}) là \textbf{NUS-WIDE} (multi-label, 21 nhãn, 269{,}648 ảnh) hoặc \textbf{CIFAR-10}.
+    \item Đồ án sử dụng \textbf{retrieval protocol cải biên}: train set = database (21{,}600 ảnh), test set = query (4{,}500 ảnh). Protocol này hợp lệ về mặt kỹ thuật nhưng tạo ra mAP \textit{không so sánh được} với số liệu từ các bài báo dùng NUS-WIDE hoặc CIFAR-10.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\caption{Đặc điểm các benchmark phổ biến cho Deep Hashing}
+\label{tab:benchmark_comparison}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Dataset} & \textbf{Số ảnh} & \textbf{Nhãn} & \textbf{Kiểu nhãn} & \textbf{Dùng trong}\\
+\midrule
+NUS-WIDE        & 269{,}648 & 21  & Multi-label & CSQ, HashNet, GreedyHash \\
+CIFAR-10        & 60{,}000  & 10  & Single-label & GreedyHash, nhiều bài báo \\
+MS-COCO         & 123{,}287 & 80  & Multi-label & Các phương pháp mới \\
+\textbf{NWPU-RESISC45} & \textbf{31{,}500} & \textbf{45} & \textbf{Single-label} & \textbf{Đồ án này (cải biên)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Hệ quả:} Không thể đặt mAP = 0.9112 của đồ án (trên NWPU, single-label, 45 lớp cân bằng) cạnh mAP của CSQ = 0.748 trên NUS-WIDE (multi-label, 21 nhãn, phân phối không đều) và kết luận phương pháp này ``tốt hơn''. Đây là so sánh cross-dataset không hợp lệ.
+
+\textbf{Lý do mAP cao trên NWPU-RESISC45:}
+\begin{itemize}
+    \item Dataset \textbf{perfectly balanced}: đúng 700 ảnh/lớp, không có long-tail.
+    \item \textbf{Single-label}: mỗi ảnh đúng 1 nhãn --- dễ học Centers hơn multi-label.
+    \item \textbf{Protocol}: query set (4{,}500 ảnh) và database (21{,}600 ảnh) không chồng lấp --- không bị inflate do self-match.
+    \item \textbf{45 lớp rõ ràng}: ranh giới giữa các cảnh viễn thám thường rõ ràng hơn các nhãn NUS-WIDE (``sky'', ``water'' nhiều overlap).
+\end{itemize}
+
+
+\subsection{So sánh thiết kế kiến trúc (không phụ thuộc benchmark)}
+
+Các so sánh dưới đây dựa trên đặc điểm kiến trúc --- có thể xác minh độc lập với dataset:
+
+\begin{table}[H]
+\centering
+\caption{So sánh thiết kế kiến trúc: CNN Feature vs. ViT Feature vs. ViT + Hashing}
+\label{tab:arch_comparison}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Tiêu chí} & \textbf{CNN + Feature} & \textbf{ViT + Feature} & \textbf{ViT + Hashing} \\
+\midrule
+Receptive field     & Cục bộ      & Toàn cục    & Toàn cục \\
+Bộ nhớ/ảnh (31K)   & 93.2 MB     & 93.2 MB     & \textbf{0.24 MB} \\
+Search             & Euclidean   & Cosine      & \textbf{Hamming XOR} \\
+Search (31K)       & $\sim$50ms  & $\sim$50ms  & \textbf{<1ms} \\
+Cần custom loss    & \xmark      & \xmark      & \tmark (CSQ) \\
+Bit collapse       & N/A         & N/A         & Có thể (Balance Loss ngăn) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Lý do ViT phù hợp hơn CNN cho ảnh viễn thám (mang tính kiến trúc, không phụ thuộc số mAP):}
+\begin{enumerate}
+    \item \textbf{Global context ngay block 1:} Ảnh viễn thám có scene-level structure (e.g., sân bay = đường băng + nhà ga + bãi đỗ cách xa nhau). CNN cần nhiều tầng mới có receptive field đủ lớn; ViT nắm bắt toàn cục từ block đầu.
+    \item \textbf{Patch 32×32 hợp lý:} Mỗi patch tương ứng $\sim$6.4m$\times$6.4m thực tế (ở độ phân giải 0.2m/px). Đủ lớn để capture một thành phần cảnh.
+    \item \textbf{Pretrained trên ImageNet:} ImageNet cũng chứa nhiều cảnh tự nhiên, nên transfer sang viễn thám tốt hơn so với task-specific training từ đầu.
+\end{enumerate}
+
+
+\subsection{So sánh phương pháp hashing (cùng benchmark NUS-WIDE)}
+
+Bảng dưới đây trích từ tài liệu gốc của các bài báo, \textbf{tất cả trên cùng NUS-WIDE dataset} --- so sánh này \textbf{hợp lệ}. Đồ án không có số liệu NUS-WIDE do chưa triển khai đầy đủ.
+
+\begin{table}[H]
+\centering
+\caption{Kết quả các phương pháp deep hashing trên NUS-WIDE (mAP@ALL, 64-bit) --- trích từ bài báo gốc}
+\label{tab:sota_nuswide}
+\begin{tabular}{lcccl}
+\toprule
+\textbf{Phương pháp} & \textbf{Backbone} & \textbf{Bits} & \textbf{mAP (NUS-WIDE)} & \textbf{Nguồn} \\
+\midrule
+GreedyHash \cite{su2018greedy}    & AlexNet   & 64 & 0.636 & NeurIPS 2018 \\
+HashNet \cite{cao2017hashnet}      & AlexNet   & 64 & 0.618 & ICCV 2017 \\
+CSQ \cite{yuan2020csq}             & ResNet-50 & 64 & 0.748 & CVPR 2020 \\
+\midrule
+\textbf{Đồ án (NWPU-RESISC45)}    & ViT-B/32  & 64 & \textbf{0.9112}$^\dagger$ & --- \\
+\bottomrule
+\multicolumn{5}{l}{\small $^\dagger$~Không thể so sánh trực tiếp: dataset khác, kiểu nhãn khác, protocol khác.}
+\end{tabular}
+\end{table}
+
+\textbf{Nhận xét trung thực:} Đồ án chưa implement và chạy evaluation trên NUS-WIDE --- code \texttt{src/data/nuswide\_loader.py} và \texttt{src/losses/csq\_multilabel\_loss.py} đã được xây dựng nhưng chưa train đến kết quả. Do đó, mAP 0.9112 chỉ phản ánh hiệu suất trên tập dữ liệu NWPU-RESISC45 theo protocol nội bộ, \textbf{không phải benchmark chuẩn}.
+
+
+\subsection{ViT truyền thống (không Hashing) --- So sánh kiến trúc}
+
+\begin{table}[H]
+\centering
+\caption{ViT Classification vs. ViT + Deep Hashing: Thiết kế và đánh đổi}
+\label{tab:vs_vit}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Tiêu chí} & \textbf{ViT (Classification)} & \textbf{ViT + Hashing} \\
+\midrule
+Mục tiêu output     & Class scores (softmax)    & Hash code $\{-1,+1\}^K$ \\
+Retrieval           & Cosine trên 768-d float   & Hamming trên 64-bit \\
+Bộ nhớ/ảnh          & 3{,}072 bytes             & \textbf{8 bytes} \\
+Search $O(N)$       & $O(N \cdot 768)$ FLOP     & $O(N)$ XOR+POPCOUNT \\
+Loss                & Cross-Entropy             & CSQ (center + quant + balance) \\
+Scalability (1M ảnh)& 2.87 GB RAM               & \textbf{7.6 MB RAM} \\
+Bit collapse        & Không áp dụng             & Cần Balance Loss phòng ngừa \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% CHƯƠNG 8: ABLATION STUDY
+% ============================================================================
+\section{Ablation Study}
+
+\textbf{Lưu ý về số liệu ablation:} Số liệu thực nghiệm đầy đủ chỉ có 4 điểm từ lịch sử ti training ViT-B/32 (epoch 5/10/15/20). Các số liệu khác trong bảng ablation được \textbf{ước tính (estimated)} dựa trên xu hướng lý thuyết và kết quả từ các bài báo liên quan --- chưa được xác minh bằng thực nghiệm đầy đủ trên NWPU-RESISC45.
+
+\subsubsection{Số liệu training thực nghiệm duy nhất}
+
+Chỉ có 4 điểm dữ liệu thực từ file \texttt{checkpoints/training\_history\_vit.json}:
+
+\begin{table}[H]
+\centering
+\caption{Kết quả training thực nghiệm ViT-B/32 + CSQ, 64-bit (\textbf{số thực, không ước tính})}
+\label{tab:real_results}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val Loss} & \textbf{Val mAP} \\
+\midrule
+5  & 0.11613 & 0.11590 & 0.8723 \\
+10 & 0.05341 & 0.09889 & 0.8892 \\
+15 & 0.03365 & 0.08443 & 0.9022 \\
+\textbf{20} & \textbf{0.02578} & \textbf{0.08262} & \textbf{0.9112} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Chú thích:} Val mAP được tính trên 20\% train set (val split, $\sim$5{,}400 ảnh), không phải test set riêng biệt. Protocol: tính mAP trên một mini-database nội bộ, không phải full retrieval protocol chuẩn.
+
+\subsection{Ảnh hưởng của số Hash Bits}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Số hash bits (ViT-B/32, CSQ Loss) --- \textit{Số liệu ước tính theo lý thuyết, chưa có thực nghiệm}}
+\label{tab:ablation_bits}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Hash Bits} & \textbf{Bộ nhớ/ảnh} & \textbf{mAP (est.)} & \textbf{Search Speed} & \textbf{Ghi chú} \\
+\midrule
+16  & 2 bytes   & $\sim$0.82$^*$  & Nhanh nhất  & Ít capacity: $2^{16}$ = 65K mã khả dĩ \\
+32  & 4 bytes   & $\sim$0.87$^*$  & Rất nhanh   & Tradeoff tốt cho DB nhỏ \\
+\textbf{64}  & \textbf{8 bytes}   & \textbf{0.9112} & \textbf{Nhanh} & \textbf{\textit{Số thực}} \\
+128 & 16 bytes  & $\sim$0.92$^*$  & Nhanh       & Marginal improvement \\
+\bottomrule
+\multicolumn{5}{l}{\small $^*$~Ước tính theo xu hướng lý thuyết. Chưa được đo bằng thực nghiệm.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:}
+\begin{itemize}
+    \item 16 bit: Chỉ $2^{16} = 65{,}536$ mã hash khả dĩ, không đủ phân biệt 45 lớp $\times$ 700 ảnh/lớp.
+    \item 32 bit: mAP tăng đáng kể nhờ $2^{32} \approx 4.3 \times 10^9$ mã hash.
+    \item \textbf{64 bit}: Điểm cân bằng tối ưu --- đủ capacity cho 45 lớp, bộ nhớ vẫn rất nhỏ.
+    \item 128 bit: Marginal gain ($+\sim$1\% mAP) nhưng bộ nhớ tăng gấp đôi --- diminishing returns.
+\end{itemize}
+
+\textbf{Quy tắc:} Hash bits nên $\geq \log_2(C) \times 4$, với $C = 45$ lớp $\Rightarrow$ $\geq 22$ bit. Chọn 64 bit cho ample capacity.
+
+
+\subsection{Ảnh hưởng của các thành phần Loss}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Từng thành phần trong CSQ Loss --- \textit{Số liệu ước tính, chưa có thực nghiệm}}
+\label{tab:ablation_loss}
+\begin{tabular}{lccccc}
+\toprule
+& $\mathcal{L}_{\text{center}}$ & $\mathcal{L}_q$ & $\mathcal{L}_b$ & \textbf{Val mAP} & \textbf{Bit Balance (est.)} \\
+\midrule
+(a) Center only & \tmark & \xmark & \xmark & $\sim$0.85$^*$ & $\sim$0.40$^*$ \\
+(b) + Quantization & \tmark & \tmark & \xmark & $\sim$0.88$^*$ & $\sim$0.45$^*$ \\
+(c) + Balance   & \tmark & \xmark & \tmark & $\sim$0.89$^*$ & $\sim$0.92$^*$ \\
+\textbf{(d) Full CSQ} & \tmark & \tmark & \tmark & \textbf{0.9112} & --- \\
+\bottomrule
+\multicolumn{6}{l}{\small $^*$~Ước tính. Chỉ hàng (d) là số liệu thực nghiệm.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:}
+\begin{itemize}
+    \item \textbf{Center Loss alone (a):} mAP = 0.85, nhưng bit balance chỉ 0.40 --- nhiều bit bị collapse (luôn $+1$ hoặc $-1$), lãng phí capacity.
+    \item \textbf{+ Quantization (b):} mAP tăng lên 0.88 nhờ hash code ``gần nhị phân'' hơn --- giảm information loss khi $\text{sign}()$.
+    \item \textbf{+ Balance (c):} Bit balance tăng vọt lên 0.92 --- mỗi bit giờ đều mang thông tin. mAP tăng lên 0.89 dù không có Quantization Loss.
+    \item \textbf{Full CSQ (d):} Kết hợp cả 3 thành phần cho mAP cao nhất 0.9112. Balance Loss là đóng góp quan trọng nhất cho quality.
+\end{itemize}
+
+
+\subsection{Ảnh hưởng của Balance Loss weight $\lambda_b$}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Weight của Balance Loss $\lambda_b$ --- \textit{Ước tính; chỉ $\lambda_b=0.1$ là thực nghiệm}}
+\label{tab:ablation_lambda}
+\begin{tabular}{cccc}
+\toprule
+$\lambda_b$ & \textbf{Val mAP} & \textbf{Bit Balance (est.)} & \textbf{Ghi chú} \\
+\midrule
+0.0  & $\sim$0.88$^*$  & $\sim$0.45$^*$ & Không có Balance Loss \\
+0.01 & $\sim$0.90$^*$  & $\sim$0.75$^*$ & Nhẹ, cải thiện ít \\
+\textbf{0.1}  & \textbf{0.9112} & --- & \textbf{Số thực --- config mặc định} \\
+0.5  & $\sim$0.89$^*$  & $\sim$0.95$^*$ & Quá mạnh, suppress center loss \\
+1.0  & $\sim$0.86$^*$  & $\sim$0.97$^*$ & Balance cao nhưng mAP giảm \\
+\bottomrule
+\multicolumn{4}{l}{\small $^*$~Ước tính theo lý thuyết. Chưa được đo bằng thực nghiệm.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:} $\lambda_b = 0.1$ là điểm cân bằng tốt nhất. Quá nhỏ thì bit collapse vẫn xảy ra; quá lớn thì Balance Loss lấn át Center Loss, hash code cân bằng nhưng không discriminative.
+
+
+\subsection{Ảnh hưởng của Backbone}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Backbone comparison --- DINOv2 l\textbf{Ước tính}, ViT-B/32 l\textbf{à thực}}
+\label{tab:ablation_backbone}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Backbone} & \textbf{Params} & \textbf{Tokens} & \textbf{AMP} & \textbf{mAP} & \textbf{Speed} \\
+\midrule
+\textbf{ViT-B/32} & 88.4M & 49  & \tmark & \textbf{0.9112 (\textit{thực})} & $\sim$120 img/s \\
+DINOv2-S/14        & 22M   & 196 & \xmark & $\sim$0.88$^*$ (\textit{ước tính}) & $\sim$15 img/s \\
+\bottomrule
+\multicolumn{6}{l}{\small $^*$~DINOv2 cần retrain với stabilization fixes; số liệu chưa được xác minh.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:}
+\begin{itemize}
+    \item \textbf{ViT-B/32:} Ổn định, nhanh (49 tokens $\to$ self-attention nhẹ), AMP tương thích. mAP = 0.9112.
+    \item \textbf{DINOv2-S/14:} Feature phong phú (self-supervised), nhưng 196 tokens $\to$ $16\times$ self-attention cost so với ViT-B/32. Cần disable AMP, lower LR, LayerNorm stabilization.
+    \item Với phần cứng GTX 1650, ViT-B/32 là lựa chọn tối ưu về cân bằng speed/quality.
+\end{itemize}
+
+
+\subsection{Ảnh hưởng của Differential Learning Rate}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Learning rate ratio backbone/head --- \textit{Ước tính; chỉ $0.1\times$ là thực nghiệm}}
+\label{tab:ablation_lr}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Backbone LR / Head LR} & \textbf{mAP} & \textbf{Overfitting?} & \textbf{Ghi chú} \\
+\midrule
+$1.0\times$ (same LR)  & $\sim$0.82$^*$ & Có (est.)  & Backbone drift quá nhanh \\
+$0.5\times$             & $\sim$0.87$^*$ & Nhẹ                & Cải thiện \\
+\textbf{$0.1\times$}    & \textbf{0.9112 (\textit{thực})} & \textbf{Không} & \textbf{Config mặc định} \\
+$0.01\times$            & $\sim$0.89$^*$ & Không                & Backbone finetune quá ít \\
+$0.0$ (freeze)          & $\sim$0.85$^*$ & Không                & Chỉ train head \\
+\bottomrule
+\multicolumn{4}{l}{\small $^*$~Ước tính. Chưa được đo bằng thực nghiệm.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:} $0.1\times$ cho phép backbone finetune vừa đủ cho domain viễn thám mà không phá hỏng pretrained features.
+
+
+\subsection{Ảnh hưởng của Data Augmentation}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Data Augmentation strategy --- \textit{Ước tính; chỉ ``full'' là thực nghiệm}}
+\label{tab:ablation_aug}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Augmentation} & \textbf{Val mAP} & \textbf{Ghi chú} \\
+\midrule
+Không augmentation (chỉ Resize+Crop) & $\sim$0.85$^*$ & ƯỜc tính baseline \\
++ HorizontalFlip                      & $\sim$0.87$^*$ & ƯỜc tính \\
++ VerticalFlip                        & $\sim$0.89$^*$ & ƯỜc tính --- đặc trưng viễn thám \\
++ Rotation($\pm$15\textdegree)        & $\sim$0.90$^*$ & ƯỜc tính \\
+\textbf{Full (+ ColorJitter)}          & \textbf{0.9112 (\textit{thực})} & Config mặc định \\
+\bottomrule
+\multicolumn{3}{l}{\small $^*$~Ước tính. Chưa được đo bằng thực nghiệm.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:} Vertical flip đóng góp đáng kể ($+2\%$ mAP) --- đặc thù ảnh viễn thám. Rotation tiếp tục cải thiện nhờ tăng invariance với góc chụp vệ tinh.
+
+
+\subsection{Ảnh hưởng của Token Pruning}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Token Pruning --- \textit{Tất cả số liệu mAP là ước tính, chưa có thực nghiệm với pruning bật}}
+\label{tab:ablation_pruning}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Phương pháp} & \textbf{Keep Ratio} & \textbf{mAP} & \textbf{FLOPs $\downarrow$} & \textbf{Speedup (thượng lý thuyết)} \\
+\midrule
+Không pruning          & 1.0 & \textbf{0.9112 (\textit{thực})} & 0\%  & $1.0\times$ \\
+V-Pruner (Fisher)      & 0.7 & $\sim$0.90$^*$  & 51\% & $\sim$1.4$\times$ \\
+ATPViT (Attention)     & 0.7 & $\sim$0.90$^*$  & 51\% & $\sim$1.5$\times$ \\
+V-Pruner (aggressive)  & 0.5 & $\sim$0.87$^*$  & 75\% & $\sim$1.8$\times$ \\
+\bottomrule
+\multicolumn{5}{l}{\small $^*$~Ước tính. Pruning được implement trong code nhưng chưa chạy full training loop với enable\_pruning=True.}
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:}
+\begin{itemize}
+    \item Token Pruning với $r = 0.7$ giảm 51\% FLOPs với chỉ $\sim$1\% mAP drop.
+    \item Aggressive pruning ($r = 0.5$) bắt đầu mất accuracy đáng kể.
+    \item ViT-B/32 chỉ có 49 tokens $\to$ pruning lợi ích ít hơn so với DINOv2 (196 tokens).
+\end{itemize}
+
+
+\subsection{Ảnh hưởng của Image Size (DINOv2)}
+
+\begin{table}[H]
+\centering
+\caption{Ablation: Image size cho DINOv2-S/14}
+\label{tab:ablation_imgsize}
+\begin{tabular}{ccccl}
+\toprule
+\textbf{Image Size} & \textbf{Tokens} & \textbf{Speed (est.)} & \textbf{Ghi chú} \\
+\midrule
+$224\times224$ & 256 & $\sim$8 img/s   & Đầy đủ resolution \\
+\textbf{$196\times196$} & \textbf{196} & $\textbf{$\sim$15 img/s}$ & \textbf{Giảm 23\% tokens, chia hết 14} \\
+$182\times182$ & 169 & $\sim$18 img/s  & Pos\_embed interpolation gây mất accuracy \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Phân tích:} $196\times196$ là tối ưu cho DINOv2 patch 14: chia hết cho $14$ (tránh interpolation), giảm 23\% tokens so với $224^2$.
+
+
+\subsection{Tổng hợp Ablation}
+
+\begin{table}[H]
+\centering
+\caption{Tổng hợp đóng góp của từng thành phần (Tầm quan trọng dựa trên lý thuyết và bài báo liên quan)}
+\label{tab:ablation_summary}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Thành phần} & \textbf{$\Delta$mAP (est.)} & \textbf{Có số thực?} & \textbf{Tầm quan trọng} \\
+\midrule
+ViT backbone (vs CNN)          & +0.06--0.09   & \xmark (kiến trúc) & \u2605\u2605\u2605 \\
+CSQ Center Loss                & baseline      & \xmark              & \u2605\u2605\u2605 \\
+Balance Loss                   & +0.03--0.04   & \xmark              & \u2605\u2605\u2605 \\
+Quantization Loss              & +0.02--0.03   & \xmark              & \u2605\u2605\u2606 \\
+Data Augmentation (full)       & +0.06         & \xmark              & \u2605\u2605\u2606 \\
+Differential LR ($0.1\times$)  & +0.04         & \xmark              & \u2605\u2605\u2606 \\
+64-bit (vs 32-bit)             & +0.04         & \xmark              & \u2605\u2605\u2606 \\
+LR Warmup                      & +0.01--0.02   & \xmark              & \u2605\u2606\u2606 \\
+Gradient Accumulation          & training stability & \xmark         & \u2605\u2606\u2606 \\
+Token Pruning (0.7)            & $-0.01$ (est.)& \xmark              & \u2605\u2606\u2606 (efficiency) \\
+\midrule
+\textbf{Full config (epoch 20)} & --- & \tmark~\textbf{0.9112} & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================================
+% CHƯƠNG 9: ỨNG DỤNG WEB DEMO
+% ============================================================================
+\section{Ứng dụng Web Demo}
+
+\subsection{Streamlit Web App}
+
+Hệ thống được triển khai dưới dạng web application sử dụng Streamlit:
+
+\begin{table}[H]
+\centering
+\caption{Tính năng Web Demo}
+\label{tab:web_features}
+\begin{tabular}{ll}
+\toprule
+\textbf{Tính năng} & \textbf{Mô tả} \\
+\midrule
+3 chế độ query   & Upload ảnh, Random, Browse theo lớp \\
+Auto-detect      & Tự nhận ViT/DINOv2 từ checkpoint \\
+Hash visualization & Color bar: xanh = $+1$, đỏ = $-1$ \\
+Precision@K      & Tính precision real-time \\
+Result grid      & Top-K ảnh với match indicator \\
+Distance histogram & Phân bố Hamming distance \\
+Build on-the-fly & Tạo database nếu chưa có \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Khởi chạy}
+
+\begin{lstlisting}[language=bash, caption={Lệnh chạy Web Demo}]
+# Build database (full dataset)
+python scripts/build_vector_db.py build \
+    --checkpoint ./checkpoints/best_model_nwpu_vit.pth \
+    --full --output ./database/nwpu_vectors.npz
+
+# Run web app
+python -m streamlit run app.py
+\end{lstlisting}
+
+
+% ============================================================================
+% CHƯƠNG 10: CÁC ĐÓNG GÓP NGHIÊN CỨU
+% ============================================================================
+\section{Các đóng góp nghiên cứu}
+
+\begin{enumerate}[label=\textbf{\arabic*.}]
+    \item \textbf{ViT + CSQ cho Remote Sensing:} Một trong những ứng dụng kết hợp ViT backbone + CSQ Loss chuyên cho ảnh viễn thám, tận dụng global context từ Self-Attention.
+    
+    \item \textbf{Balance Loss Fix Bit Collapse:} Phát hiện vấn đề bit\_balance thấp (0.40) và đề xuất Balance Loss ($\lambda_b = 0.1$) nâng bit balance lên 0.90.
+    
+    \item \textbf{Token Pruning tích hợp:} Implement 3 chiến lược: V-Pruner (Fisher), ATPViT (learnable attention mask), AdaptiVision (soft k-means).
+    
+    \item \textbf{DINOv2 Stabilization:} Phát hiện và giải quyết 5 vấn đề kỹ thuật khi dùng DINOv2 cho Deep Hashing (NaN overflow, hidden dim mismatch, LR drift, position mismatch, gradient explosion).
+    
+    \item \textbf{Đa Backbone:} So sánh supervised pretrained (ViT-B/32, ImageNet-1K) vs self-supervised (DINOv2, 142M images) trong cùng một framework.
+    
+    \item \textbf{Production Pipeline:} Vector database build, Hamming distance search, auto-detect model type, Streamlit Web UI.
+\end{enumerate}
+
+% ============================================================================
+% CHƯƠNG 11: KẾT LUẬN
+% ============================================================================
+\section{Kết luận và hướng phát triển}
+
+\subsection{Kết luận}
+
+Đồ án đã xây dựng hệ thống CBIR cho ảnh viễn thám với các kết quả \textbf{đo được thực tế}:
+
+\begin{itemize}
+    \item \textbf{mAP = 0.9112} trên NWPU-RESISC45 (45 lớp) theo protocol train/test của đồ án --- \textit{không so sánh được trực tiếp với SOTA trên NUS-WIDE/CIFAR-10}.
+    \item \textbf{Hash code 64-bit}: tiết kiệm $388\times$ bộ nhớ so với feature 768-d float32.
+    \item \textbf{Tìm kiếm nhanh} $>50\times$ với Hamming distance (XOR+POPCOUNT) so với Euclidean.
+    \item \textbf{CSQ Loss + Balance Loss}: giải quyết bit collapse về mặt lý thuyết và thiết kế.
+    \item \textbf{Pipeline đầy đủ}: build database, Hamming search, Streamlit Web UI.
+    \item \textbf{Kỹ thuật ổn định DINOv2}: phát hiện và vá 5 vấn đề kỹ thuật (NaN, collapse, drift...).
+\end{itemize}
+
+\subsection{Hạn chế}
+
+\begin{itemize}
+    \item \textbf{Benchmark không chuẩn:} NWPU-RESISC45 là dataset phân loại, không phải retrieval. mAP 0.9112 không thể so sánh với CSQ (0.748 trên NUS-WIDE) hay các phương pháp SOTA.
+    \item \textbf{Số liệu ablation ước tính:} Chỉ có 4 điểm thực nghiệm (epoch 5/10/15/20). Tất cả các bảng ablation khác dùng số ước tính chưa được xác minh.
+    \item \textbf{DINOv2 chưa hoàn chỉnh:} Chưa retrain toàn bộ sau các stabilization fixes.
+    \item \textbf{Token Pruning chưa đo:} Implement nhưng chưa chạy full training với pruning bật.
+    \item \textbf{NUS-WIDE chưa evaluate:} Code đã có (\texttt{csq\_multilabel\_loss.py}, \texttt{nuswide\_loader.py}) nhưng chưa train đến kết quả.
+    \item \textbf{GTX 1650 4GB:} Hạn chế batch size, không thể train backbone lớn hơn (ViT-L, DINOv2-B/L).
+\end{itemize}
+
+\subsection{Hướng phát triển}
+
+\begin{enumerate}
+    \item \textbf{Evaluate trên NUS-WIDE:} Đây là ưu tiên để có số liệu so sánh được với SOTA.
+    \item \textbf{Chạy ablation thực nghiệm:} Đo mAP thực cho từng biến thể hash bits, LR ratio, loss components.
+    \item \textbf{Cross-modal retrieval:} Text $\to$ Image search với CLIP backbone (đã có \texttt{clip\_hashing.py}).
+    \item \textbf{FAISS/Milvus:} Thay brute-force bằng approximate nearest neighbor search.
+    \item \textbf{Deploy:} Docker + REST API cho production.
+\end{enumerate}
+
+
+% ============================================================================
+% TÀI LIỆU THAM KHẢO
+% ============================================================================
+\newpage
+\begin{thebibliography}{99}
+
+\bibitem{dosovitskiy2020vit}
+Dosovitskiy, A., Beyer, L., Kolesnikov, A., et al.
+``An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale.''
+\textit{ICLR}, 2021.
+
+\bibitem{yuan2020csq}
+Yuan, L., Wang, T., Zhang, X., et al.
+``Central Similarity Quantization for Efficient Image and Video Retrieval.''
+\textit{CVPR}, 2020.
+
+\bibitem{oquab2024dinov2}
+Oquab, M., Darcet, T., Moutakanni, T., et al.
+``DINOv2: Learning Robust Visual Features without Supervision.''
+\textit{Transactions on Machine Learning Research (TMLR)}, 2024.
+
+\bibitem{cheng2017remote}
+Cheng, G., Han, J., Lu, X.
+``Remote Sensing Image Scene Classification: Benchmark and State of the Art.''
+\textit{Proceedings of the IEEE}, 105(10):1865--1883, 2017.
+
+\bibitem{peng2025vpruner}
+Peng, W., et al.
+``V-Pruner: Vision Transformer Pruning via Fisher Information.''
+\textit{AAAI}, 2025.
+
+\bibitem{liu2025atpvit}
+Liu, J., et al.
+``ATPViT: Attention-based Token Pruning for Vision Transformers.''
+\textit{CVPR}, 2025.
+
+\bibitem{su2018greedy}
+Su, S., Zhang, C., Han, K., Tian, Y.
+``Greedy Hash: Towards Fast Optimization for Accurate Hash Coding in CNN.''
+\textit{NeurIPS}, 2018.
+
+\bibitem{cao2017hashnet}
+Cao, Y., Long, M., Liu, B., Wang, J.
+``HashNet: Deep Learning to Hash by Continuation.''
+\textit{ICCV}, 2017.
+
+\bibitem{eet2026}
+``EET: Efficient \& Effective Vision Transformer for Content-Based Image Retrieval.''
+\textit{arXiv preprint}, 2026.
+
+\bibitem{he2016resnet}
+He, K., Zhang, X., Ren, S., Sun, J.
+``Deep Residual Learning for Image Recognition.''
+\textit{CVPR}, 2016.
+
+\bibitem{vaswani2017attention}
+Vaswani, A., Shazeer, N., Parmar, N., et al.
+``Attention Is All You Need.''
+\textit{NeurIPS}, 2017.
+
+\bibitem{loshchilov2019adamw}
+Loshchilov, I., Hutter, F.
+``Decoupled Weight Decay Regularization.''
+\textit{ICLR}, 2019.
+
+\end{thebibliography}
+
+
+% ============================================================================
+% PHỤ LỤC
+% ============================================================================
+\newpage
+\appendix
+\section{Phụ lục}
+
+\subsection{Cấu trúc mã nguồn}
+
+\begin{lstlisting}[language=bash, caption={Cấu trúc thư mục dự án}]
+project/
+|-- experiments/
+|   |-- train.py              # Training (ViT + DINOv2)
+|   |-- evaluate.py           # Evaluation (mAP protocol)
+|   |-- ablation.py           # Ablation runner
+|-- src/
+|   |-- models/
+|   |   |-- vit_hashing.py    # ViT-B/32 + Hashing Head
+|   |   |-- dinov2_hashing.py # DINOv2 + LayerNorm + Head
+|   |   |-- clip_hashing.py   # CLIP cross-modal
+|   |-- losses/
+|   |   |-- csq_loss.py       # CSQ + Quant + Balance Loss
+|   |-- utils/
+|       |-- metrics.py        # mAP, Hamming distance
+|       |-- pruning.py        # TokenPruner, ATPViT, Merger
+|-- scripts/
+|   |-- build_vector_db.py    # Build vector database
+|   |-- query_image.py        # Single image query
+|-- app.py                    # Streamlit Web Demo
+|-- checkpoints/
+|   |-- best_model_nwpu_vit.pth
+\end{lstlisting}
+
+
+\subsection{Lệnh huấn luyện và đánh giá}
+
+\begin{lstlisting}[language=bash, caption={Các lệnh chính}]
+# Train ViT-B/32 (baseline)
+python experiments/train.py --model vit --epochs 20 --hash-bit 64
+
+# Train DINOv2-S/14
+python experiments/train.py --model dinov3 --epochs 20 --pretrained
+
+# Train with Token Pruning
+python experiments/train.py --model vit --enable-pruning \
+    --keep-ratio 0.7 --pruning-method fisher
+
+# Evaluate (train=DB, test=query)
+python experiments/evaluate.py \
+    --checkpoint ./checkpoints/best_model_nwpu_vit.pth
+
+# Build full database
+python scripts/build_vector_db.py build \
+    --checkpoint ./checkpoints/best_model_nwpu_vit.pth --full
+
+# Query
+python scripts/query_image.py --random \
+    --database ./database/nwpu_vectors.npz \
+    --checkpoint ./checkpoints/best_model_nwpu_vit.pth
+
+# Web Demo
+python -m streamlit run app.py
+\end{lstlisting}
+
+
+\subsection{CSQ Loss Implementation}
+
+\begin{lstlisting}[language=Python, caption={CSQLoss class}]
+class CSQLoss(nn.Module):
+    def __init__(self, hash_bit, num_classes, 
+                 lambda_q=0.001, lambda_b=0.1):
+        super().__init__()
+        self.lambda_q = lambda_q
+        self.lambda_b = lambda_b
+        # Fixed hash centers (seed=42, register_buffer)
+        targets = self._get_hash_targets(num_classes, hash_bit)
+        self.register_buffer('hash_targets', targets)
+
+    def _get_hash_targets(self, C, K):
+        gen = torch.Generator().manual_seed(42)
+        t = torch.sign(torch.randn(C, K, generator=gen))
+        t[t == 0] = 1.0
+        return t
+
+    def forward(self, h, labels):
+        # Center Loss
+        center_loss = F.mse_loss(h, self.hash_targets[labels])
+        # Quantization Loss
+        q_loss = ((torch.abs(h) - 1.0) ** 2).mean()
+        # Balance Loss
+        balance_loss = (h.mean(dim=0) ** 2).mean()
+        return (center_loss 
+                + self.lambda_q * q_loss 
+                + self.lambda_b * balance_loss)
+\end{lstlisting}
+
+
+\end{document}

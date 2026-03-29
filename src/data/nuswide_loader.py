@@ -405,3 +405,138 @@ if __name__ == '__main__':
             print(f"Sample label (multi-hot): {labels[0]}")
             print(f"Number of positive labels: {labels[0].sum().item()}")
             break
+
+
+# ============================================================================
+# NUSWIDEPreprocessedDataset — directly reads the pre-split archive format
+# Files expected inside data_dir:
+#   database_img.txt          — 193,734 lines  "images/XXXX_hash.jpg"
+#   database_label_onehot.txt — 193,734 lines  "0 0 1 0 ... (21 values)"
+#   test_img.txt              — 2,100   lines  (query set)
+#   test_label_onehot.txt     — 2,100   lines
+# ============================================================================
+
+class NUSWIDEPreprocessedDataset(Dataset):
+    """
+    Dataset that reads the pre-split NUS-WIDE archive format directly.
+
+    Standard hashing protocol (same as CSQ, HashNet papers):
+        Query    : 2,100 images  — test_img.txt / test_label_onehot.txt
+        Database : 193,734 images — database_img.txt / database_label_onehot.txt
+        Train    : 10,500 images randomly sampled from database
+                   (500 per class × 21 classes, seed-reproducible)
+    """
+
+    _SPLIT_FILES = {
+        'query':    ('test_img.txt',     'test_label_onehot.txt'),
+        'database': ('database_img.txt', 'database_label_onehot.txt'),
+        'train':    ('database_img.txt', 'database_label_onehot.txt'),
+    }
+
+    def __init__(
+        self,
+        data_dir: str,
+        split: str = 'query',           # 'query' | 'database' | 'train'
+        train_per_class: int = 500,     # images per class for train split
+        seed: int = 42,
+        transform=None,
+    ):
+        assert split in ('query', 'database', 'train'), \
+            f"split must be 'query', 'database', or 'train', got '{split}'"
+
+        self.data_dir = data_dir
+        self.split = split
+        self.transform = transform or self._default_transform(split)
+
+        img_file, lbl_file = self._SPLIT_FILES[split]
+        img_path  = os.path.join(data_dir, img_file)
+        lbl_path  = os.path.join(data_dir, lbl_file)
+
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(
+                f"[NUS-WIDE] Not found: {img_path}\n"
+                f"Expected directory: {data_dir}"
+            )
+
+        # Load all image paths
+        with open(img_path, 'r') as f:
+            all_img = [os.path.join(data_dir, line.strip()) for line in f]
+
+        # Load one-hot labels  (space-separated per line)
+        all_lbl = np.loadtxt(lbl_path, dtype=np.float32)  # [N, 21]
+
+        if split == 'train':
+            # Sample 500 images per class (reproducible)
+            rng = np.random.default_rng(seed)
+            keep = set()
+            for c in range(all_lbl.shape[1]):
+                pos = np.where(all_lbl[:, c] == 1)[0]
+                chosen = rng.choice(pos, size=min(train_per_class, len(pos)), replace=False)
+                keep.update(chosen.tolist())
+            keep = sorted(keep)
+            all_img = [all_img[i] for i in keep]
+            all_lbl = all_lbl[keep]
+
+        self.image_paths = all_img
+        self.labels = all_lbl
+        print(f"[NUS-WIDE] split='{split}' — {len(self)} images, 21 labels")
+
+    @staticmethod
+    def _default_transform(split: str):
+        if split == 'train':
+            return transforms.Compose([
+                transforms.Resize(256),
+                transforms.RandomCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406],
+                                     [0.229, 0.224, 0.225]),
+            ])
+        return transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225]),
+        ])
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        try:
+            img = Image.open(self.image_paths[idx]).convert('RGB')
+        except Exception:
+            img = Image.new('RGB', (224, 224))
+        if self.transform:
+            img = self.transform(img)
+        return img, torch.from_numpy(self.labels[idx])
+
+
+def get_nuswide_preprocessed_loaders(
+    data_dir: str = './src/data/archive/NUS-WIDE',
+    batch_size: int = 32,
+    num_workers: int = 4,
+    train_per_class: int = 500,
+    seed: int = 42,
+) -> Tuple['DataLoader', 'DataLoader', 'DataLoader']:
+    """
+    Returns (train_loader, query_loader, db_loader) for the standard
+    NUS-WIDE hashing benchmark using the pre-split archive files.
+
+    Protocol matches CSQ / HashNet papers:
+        Train   : ~10,500 imgs  (500/class × 21 classes, from database)
+        Query   :  2,100  imgs  (test_img.txt)
+        Database: 193,734 imgs  (database_img.txt)
+    """
+    train_ds = NUSWIDEPreprocessedDataset(data_dir, 'train',  train_per_class, seed)
+    query_ds = NUSWIDEPreprocessedDataset(data_dir, 'query',  train_per_class, seed)
+    db_ds    = NUSWIDEPreprocessedDataset(data_dir, 'database', train_per_class, seed)
+
+    def make_loader(ds, shuffle):
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                          num_workers=num_workers, pin_memory=True,
+                          drop_last=shuffle, persistent_workers=num_workers > 0)
+
+    return make_loader(train_ds, True), make_loader(query_ds, False), make_loader(db_ds, False)
+

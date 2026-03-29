@@ -43,7 +43,10 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Data
-from src.data.nuswide_loader import get_nuswide_dataloaders, NUSWIDE_21_LABELS
+from src.data.nuswide_loader import (
+    get_nuswide_preprocessed_loaders,
+    NUSWIDE_21_LABELS,
+)
 
 # Models
 from src.models.vit_hashing import ViT_Hashing
@@ -262,20 +265,13 @@ def train(args):
     
     # Data
     print("\n[Loading Data]")
-    
-    max_train = 1000 if args.quick else None
-    max_query = 200 if args.quick else None
-    max_db = 500 if args.quick else None
-    
-    train_loader, query_loader, db_loader, label_names = get_nuswide_dataloaders(
+    train_loader, query_loader, db_loader = get_nuswide_preprocessed_loaders(
         data_dir=args.data_dir,
         batch_size=batch_size,
-        use_21_labels=True,
         num_workers=args.num_workers,
-        max_train=max_train,
-        max_query=max_query,
-        max_db=max_db,
+        train_per_class=50 if args.quick else 500,
     )
+    label_names = NUSWIDE_21_LABELS
     
     # Model
     model = build_model(
@@ -284,7 +280,29 @@ def train(args):
         hash_bit=hash_bit,
         device=device
     )
-    
+
+    # Fine-tune from NWPU checkpoint (partial weight loading)
+    if getattr(args, 'finetune_from', None):
+        print(f"\n[Fine-tune] Loading weights from: {args.finetune_from}")
+        ckpt = torch.load(args.finetune_from, weights_only=False, map_location='cpu')
+        src_sd = ckpt['model_state_dict']
+
+        # Always load backbone (ViT feature extractor transfers across domains)
+        backbone_sd = {k: v for k, v in src_sd.items() if k.startswith('backbone')}
+        missing, unexpected = model.load_state_dict(backbone_sd, strict=False)
+        print(f"  Backbone: loaded {len(backbone_sd)} tensors  "
+              f"(missing={len(missing)}, unexpected={len(unexpected)})")
+
+        # Optionally copy the hashing head (same 768→1024→64 arch, different hash centres in loss)
+        if getattr(args, 'transfer_head', False):
+            head_sd = {k: v for k, v in src_sd.items() if k.startswith('hashing_head')}
+            model.load_state_dict(head_sd, strict=False)
+            print(f"  Hashing head: loaded {len(head_sd)} tensors")
+
+        # Already fine-tuned backbone needs a much smaller LR nudge
+        lr_backbone = lr_backbone * 0.1
+        print(f"  Backbone LR reduced to {lr_backbone:.2e} (0.1× of base)")
+
     # Loss
     criterion = get_multilabel_loss(
         loss_type=args.loss,
@@ -400,8 +418,9 @@ def main():
     parser = argparse.ArgumentParser(description='Train on NUS-WIDE')
     
     # Data
-    parser.add_argument('--data-dir', type=str, default='./data/NUS-WIDE',
-                        help='NUS-WIDE dataset directory')
+    parser.add_argument('--data-dir', type=str,
+                        default='./src/data/archive/NUS-WIDE',
+                        help='NUS-WIDE archive directory (contains database_img.txt etc.)')
     
     # Model
     parser.add_argument('--model', type=str, choices=['vit', 'dinov2', 'dinov3'],
@@ -429,7 +448,13 @@ def main():
     # Quick test
     parser.add_argument('--quick', action='store_true',
                         help='Quick test with limited data')
-    
+
+    # Fine-tuning from NWPU checkpoint
+    parser.add_argument('--finetune-from', type=str, default=None,
+                        help='Path to NWPU checkpoint to initialise backbone weights from')
+    parser.add_argument('--transfer-head', action='store_true',
+                        help='Also copy hashing head weights (same 768→1024→hash_bit arch)')
+
     args = parser.parse_args()
     
     if args.quick:
