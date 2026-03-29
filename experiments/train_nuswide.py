@@ -308,7 +308,8 @@ def train(args):
         loss_type=args.loss,
         hash_bit=hash_bit,
         num_classes=num_classes,
-        lambda_q=args.lambda_q
+        lambda_q=args.lambda_q,
+        lambda_c=args.lambda_c,
     )
     
     # Optimizer (different LR for backbone and head)
@@ -439,8 +440,10 @@ def main():
     # Loss
     parser.add_argument('--loss', type=str, choices=['csq', 'dch', 'hashnet'],
                         default='csq', help='Loss function')
-    parser.add_argument('--lambda-q', type=float, default=0.0001,
+    parser.add_argument('--lambda-q', type=float, default=0.01,
                         help='Quantization loss weight')
+    parser.add_argument('--lambda-c', type=float, default=1.0,
+                        help='Center loss weight (CSQ only)')
     
     # Output
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints')
