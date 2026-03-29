@@ -196,8 +196,15 @@ class NWPUTrainer:
         self.criterion = criterion.to(self.device)
         self.optimizer = optimizer
         
-        # Mixed precision
-        self.scaler = torch.cuda.amp.GradScaler()
+        # Mixed precision — disable for DINOv2 to prevent float16 overflow
+        # DINOv2 features have large magnitude that overflows float16 (±65504)
+        self.use_amp = not isinstance(model, DINOv3Hashing)
+        # Also handle torch.compile wrapped models
+        if hasattr(model, '_orig_mod') and isinstance(model._orig_mod, DINOv3Hashing):
+            self.use_amp = False
+        if not self.use_amp:
+            print(f"  [AMP] Disabled for DINOv2 (prevents float16 overflow → NaN)")
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         
         # Token Pruning setup
         if enable_pruning:
@@ -239,7 +246,7 @@ class NWPUTrainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
             
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
                 # Forward với Token Pruning (nếu enabled)
                 if self.enable_pruning and hasattr(self.model, 'get_patch_tokens'):
                     # Lấy patch tokens trước khi hash
@@ -272,6 +279,12 @@ class NWPUTrainer:
                 loss = self.criterion(hash_codes, labels)
                 loss = loss / self.accumulation_steps
             
+            # NaN guard: skip batch if loss is NaN to prevent poisoning
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  [!] NaN/Inf loss at batch {batch_idx}, skipping...")
+                self.optimizer.zero_grad()
+                continue
+            
             self.scaler.scale(loss).backward()
             
             total_loss += loss.item() * self.accumulation_steps
@@ -280,7 +293,13 @@ class NWPUTrainer:
             if (batch_idx + 1) % self.accumulation_steps == 0:
                 # Gradient clipping để ổn định training
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                # Check for NaN gradients before stepping
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"  [!] NaN/Inf gradient at batch {batch_idx}, skipping step...")
+                    self.optimizer.zero_grad()
+                    continue
                 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -336,7 +355,7 @@ class NWPUTrainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
             
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
                 # Forward với Token Pruning (nếu enabled)
                 if self.enable_pruning and hasattr(self.model, 'get_patch_tokens'):
                     patch_tokens = self.model.get_patch_tokens(images)
@@ -433,7 +452,9 @@ def train(args):
     # Determine optimal image size
     # DINOv2 patch14: 224x224 = 256 tokens, 182x182 = 169 tokens (34% faster)
     if args.model == 'dinov3' and not args.full_resolution:
-        image_size = args.image_size if args.image_size else 182  # Faster for DINOv2
+        # 196 = 14×14 patches, chia hết cho patch_size=14
+        # 182 (13×14) cũng chia hết nhưng pos_embed interpolation 37→13 quá lớn
+        image_size = args.image_size if args.image_size else 196
         print(f"\n[!] DINOv2 optimization: Using {image_size}x{image_size} input")
         print(f"    Tokens: {(image_size // 14) ** 2} (vs 256 at 224x224)")
     else:
@@ -472,8 +493,8 @@ def train(args):
             hash_bit=args.hash_bit,
             freeze_backbone=args.freeze_backbone,
             use_gram_anchoring=args.gram_anchoring,
-            hidden_dim=1024,
-            dropout=0.5
+            hidden_dim=None,   # auto-scale based on embed_dim
+            dropout=0.3
         )
         
         # Apply torch.compile for PyTorch 2.0+ speedup
@@ -515,12 +536,23 @@ def train(args):
     print(f"  lambda_b (Balance):      {args.lambda_b}")
     
     # Optimizer với differential learning rates
+    # DINOv2 pretrained cần LR rất thấp (0.01x) để không phá weights
+    # ViT-B/32 ImageNet pretrained dùng 0.1x là đủ
+    backbone_lr_scale = 0.01 if args.model == 'dinov3' else 0.1
     print(f"\n[Optimizer] AdamW với differential LR")
-    optimizer = optim.AdamW([
-        {'params': model.backbone.parameters(), 'lr': args.lr * 0.1, 'name': 'backbone'},
-        {'params': model.hashing_head.parameters(), 'lr': args.lr, 'name': 'hashing_head'}
-    ], weight_decay=args.weight_decay)
-    print(f"  Backbone LR: {args.lr * 0.1}")
+    
+    # Collect params — include feature_norm if present (DINOv2)
+    param_groups = [
+        {'params': model.backbone.parameters(), 'lr': args.lr * backbone_lr_scale, 'name': 'backbone'},
+        {'params': model.hashing_head.parameters(), 'lr': args.lr, 'name': 'hashing_head'},
+    ]
+    if hasattr(model, 'feature_norm'):
+        param_groups.append({'params': model.feature_norm.parameters(), 'lr': args.lr, 'name': 'feature_norm'})
+    if hasattr(model, 'gram_projection'):
+        param_groups.append({'params': model.gram_projection.parameters(), 'lr': args.lr, 'name': 'gram_projection'})
+    
+    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
+    print(f"  Backbone LR: {args.lr * backbone_lr_scale}")
     print(f"  Head LR: {args.lr}")
     print(f"  Weight decay: {args.weight_decay}")
     
@@ -737,10 +769,10 @@ def main():
     
     # Fast mode for DINOv2 - enable all optimizations
     if args.fast and args.model == 'dinov3':
-        args.image_size = args.image_size or 182
+        args.image_size = args.image_size or 196
         args.use_compile = True
         args.freeze_backbone = True
-        print("[Fast DINOv2 mode] image_size=182, compile=True, freeze_backbone=True")
+        print("[Fast DINOv2 mode] image_size=196, compile=True, freeze_backbone=True")
         print("  Expected speedup: ~3-5x faster training")
     
     os.makedirs(args.save_dir, exist_ok=True)

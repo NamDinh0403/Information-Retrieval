@@ -92,38 +92,63 @@ class VectorDatabase:
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> Tuple[nn.Module, dict]:
-    """Load finetuned model from checkpoint."""
+    """Load finetuned model from checkpoint.
+    
+    Automatically infers model type and hash_bit from state_dict.
+    """
     print(f"[*] Loading model from {checkpoint_path}")
     
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state = checkpoint['model_state_dict']
     
-    # Get model config from checkpoint
-    hash_bit = checkpoint.get('hash_bit', 64)
-    model_type = checkpoint.get('model_type', 'vit')
-    num_classes = checkpoint.get('num_classes', 45)
+    # Infer model config from state_dict keys
+    # ViT_Hashing:    hashing_head.1.weight, hashing_head.3.weight  (nn.Sequential)
+    # DINOv3Hashing:  hashing_head.layers.1.weight  (HashingHead wraps Sequential)
+    has_layers_prefix = any('hashing_head.layers.' in k for k in state)
     
-    print(f"    Model: {model_type}, Hash bits: {hash_bit}, Classes: {num_classes}")
-    
-    # Build model
-    if model_type == 'vit':
-        model = ViT_Hashing(hash_bit=hash_bit)
-    elif model_type in ['dinov2', 'dinov3']:
-        model = DINOv3Hashing(hash_bit=hash_bit, num_classes=num_classes)
+    if has_layers_prefix:
+        model_type = 'dinov3'
+        hash_bit = state['hashing_head.layers.3.weight'].shape[0]
+        embed_dim = state['hashing_head.layers.1.weight'].shape[1]
+        hidden_dim = state['hashing_head.layers.1.weight'].shape[0]
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        model_type = 'vit'
+        hash_bit = state['hashing_head.3.weight'].shape[0]
+        embed_dim = state['hashing_head.1.weight'].shape[1]
+        hidden_dim = state['hashing_head.1.weight'].shape[0]
     
-    # Load weights
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Infer backbone variant from embed_dim
+    if model_type == 'vit':
+        pos_len = state['backbone.pos_embed'].shape[1]  # 1 + num_patches
+        model_name = 'vit_base_patch32_224' if pos_len == 50 else 'vit_base_patch16_224'
+    else:
+        dinov2_map = {384: 'vit_small_patch14_dinov2.lvd142m',
+                      768: 'vit_base_patch14_dinov2.lvd142m',
+                      1024: 'vit_large_patch14_dinov2.lvd142m'}
+        model_name = dinov2_map.get(embed_dim, 'vit_small_patch14_dinov2.lvd142m')
+    
+    print(f"    Type: {model_type} ({model_name})")
+    print(f"    Hash bits: {hash_bit}, Embed dim: {embed_dim}")
+    
+    # Build model (pretrained=False — we load our own weights)
+    if model_type == 'vit':
+        model = ViT_Hashing(model_name=model_name, pretrained=False, hash_bit=hash_bit)
+    else:
+        model = DINOv3Hashing(model_name=model_name, pretrained=False,
+                              hash_bit=hash_bit, hidden_dim=hidden_dim)
+    
+    model.load_state_dict(state)
     model = model.to(device)
     model.eval()
     
-    print(f"[✓] Model loaded successfully")
+    metrics = checkpoint.get('metrics', {})
+    print(f"    Epoch: {checkpoint.get('epoch', '?')}, Val mAP: {metrics.get('mAP', 'N/A')}")
+    print(f"[✓] Model loaded")
     
     return model, {
         'hash_bit': hash_bit,
         'model_type': model_type,
-        'num_classes': num_classes,
-        'mAP': checkpoint.get('mAP', 'N/A'),
+        'model_name': model_name,
     }
 
 
@@ -180,7 +205,7 @@ def extract_hash_codes(
 
 def build_database(
     checkpoint_path: str,
-    data_dir: str,
+    data_dirs: List[str],
     output_path: str,
     batch_size: int = 32,
     num_workers: int = 4,
@@ -189,30 +214,51 @@ def build_database(
     """
     Build vector database from finetuned model.
     
+    Supports multiple data directories (e.g. train + test) to build
+    a full dataset database for production retrieval.
+    
     Args:
         checkpoint_path: Path to model checkpoint
-        data_dir: Path to image directory (ImageFolder format)
+        data_dirs: List of image directories (ImageFolder format)
         output_path: Path to save database
         batch_size: Batch size for extraction
         num_workers: DataLoader workers
         device: 'cuda' or 'cpu'
     """
+    from torch.utils.data import ConcatDataset
+    
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     print(f"\n[Device] {device}")
     
     # Load model
     model, model_info = load_model(checkpoint_path, device)
     
-    # Create dataset
-    print(f"\n[*] Loading images from {data_dir}")
+    # Create dataset(s)
     transform = get_transform()
-    dataset = ImageFolder(data_dir, transform=transform)
+    datasets = []
+    all_image_paths = []
+    class_names = None
     
-    print(f"    Found {len(dataset)} images in {len(dataset.classes)} classes")
+    for data_dir in data_dirs:
+        print(f"\n[*] Loading images from {data_dir}")
+        ds = ImageFolder(data_dir, transform=transform)
+        print(f"    Found {len(ds)} images in {len(ds.classes)} classes")
+        datasets.append(ds)
+        all_image_paths.extend([s[0] for s in ds.samples])
+        if class_names is None:
+            class_names = ds.classes
+    
+    if len(datasets) == 1:
+        combined = datasets[0]
+    else:
+        combined = ConcatDataset(datasets)
+    
+    total = len(combined)
+    print(f"\n[*] Total: {total} images from {len(data_dirs)} source(s)")
     
     # Create dataloader
     data_loader = DataLoader(
-        dataset,
+        combined,
         batch_size=batch_size,
         shuffle=False,  # Important: keep order for path mapping
         num_workers=num_workers,
@@ -222,17 +268,14 @@ def build_database(
     # Extract hash codes
     hash_codes, labels = extract_hash_codes(model, data_loader, device)
     
-    # Get image paths
-    image_paths = [sample[0] for sample in dataset.samples]
-    
     # Create database
     from datetime import datetime
     
     db = VectorDatabase(
         hash_codes=hash_codes,
-        image_paths=image_paths,
+        image_paths=all_image_paths,
         labels=labels,
-        class_names=dataset.classes,
+        class_names=class_names,
         hash_bit=model_info['hash_bit'],
         model_type=model_info['model_type'],
         created_at=datetime.now().isoformat(),
@@ -448,8 +491,12 @@ def main():
     build_parser = subparsers.add_parser('build', help='Build vector database')
     build_parser.add_argument('--checkpoint', type=str, required=True,
                               help='Path to model checkpoint')
-    build_parser.add_argument('--data-dir', type=str, required=True,
-                              help='Path to image directory')
+    build_parser.add_argument('--data-dir', type=str, nargs='+',
+                              help='Path(s) to image directory (can specify multiple)')
+    build_parser.add_argument('--full', action='store_true',
+                              help='Build from full NWPU dataset (train + test)')
+    build_parser.add_argument('--dataset-root', type=str, default='./data/archive/Dataset',
+                              help='Root of NWPU dataset (used with --full)')
     build_parser.add_argument('--output', type=str, default='./database/vectors.npz',
                               help='Output database path')
     build_parser.add_argument('--batch-size', type=int, default=32)
@@ -480,9 +527,21 @@ def main():
     args = parser.parse_args()
     
     if args.command == 'build':
+        if args.full:
+            data_dirs = [
+                os.path.join(args.dataset_root, 'train', 'train'),
+                os.path.join(args.dataset_root, 'test', 'test'),
+            ]
+            print(f"[*] Full dataset mode: train + test")
+        elif args.data_dir:
+            data_dirs = args.data_dir
+        else:
+            print("[Error] Specify --data-dir or --full")
+            return
+        
         build_database(
             checkpoint_path=args.checkpoint,
-            data_dir=args.data_dir,
+            data_dirs=data_dirs,
             output_path=args.output,
             batch_size=args.batch_size,
             device=args.device,

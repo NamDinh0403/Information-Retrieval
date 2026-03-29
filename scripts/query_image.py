@@ -59,19 +59,29 @@ def load_database(path: str) -> dict:
 
 
 def load_model(checkpoint_path: str, device: torch.device):
-    """Load model."""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    """Load model — auto-detect type and hash_bit from state_dict."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state = checkpoint['model_state_dict']
     
-    hash_bit = checkpoint.get('hash_bit', 64)
-    model_type = checkpoint.get('model_type', 'vit')
-    num_classes = checkpoint.get('num_classes', 45)
+    has_layers_prefix = any('hashing_head.layers.' in k for k in state)
     
-    if model_type == 'vit':
-        model = ViT_Hashing(hash_bit=hash_bit, num_classes=num_classes)
+    if has_layers_prefix:
+        hash_bit = state['hashing_head.layers.3.weight'].shape[0]
+        embed_dim = state['hashing_head.layers.1.weight'].shape[1]
+        hidden_dim = state['hashing_head.layers.1.weight'].shape[0]
+        dinov2_map = {384: 'vit_small_patch14_dinov2.lvd142m',
+                      768: 'vit_base_patch14_dinov2.lvd142m',
+                      1024: 'vit_large_patch14_dinov2.lvd142m'}
+        model_name = dinov2_map.get(embed_dim, 'vit_small_patch14_dinov2.lvd142m')
+        model = DINOv3Hashing(model_name=model_name, pretrained=False,
+                              hash_bit=hash_bit, hidden_dim=hidden_dim)
     else:
-        model = DINOv3Hashing(hash_bit=hash_bit, num_classes=num_classes)
+        hash_bit = state['hashing_head.3.weight'].shape[0]
+        pos_len = state['backbone.pos_embed'].shape[1]
+        model_name = 'vit_base_patch32_224' if pos_len == 50 else 'vit_base_patch16_224'
+        model = ViT_Hashing(model_name=model_name, pretrained=False, hash_bit=hash_bit)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(state)
     model = model.to(device)
     model.eval()
     

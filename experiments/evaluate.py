@@ -40,6 +40,7 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.vit_hashing import ViT_Hashing
+from src.models.dinov2_hashing import DINOv3Hashing
 
 
 # ============================================================
@@ -411,24 +412,36 @@ def evaluate(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\n[Device] {device}")
     
-    # Load model
+    # Load model — auto-detect type and hash_bit from state_dict
     print(f"\n[Model] Loading checkpoint...")
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    state = checkpoint['model_state_dict']
     
-    # Determine model config from checkpoint
-    hash_bit = args.hash_bit
-    model_name = 'vit_base_patch32_224' if args.patch_size == 32 else 'vit_base_patch16_224'
+    has_layers_prefix = any('hashing_head.layers.' in k for k in state)
     
-    model = ViT_Hashing(
-        model_name=model_name,
-        pretrained=False,
-        hash_bit=hash_bit
-    )
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if has_layers_prefix:
+        model_type = 'dinov3'
+        hash_bit = state['hashing_head.layers.3.weight'].shape[0]
+        embed_dim = state['hashing_head.layers.1.weight'].shape[1]
+        hidden_dim = state['hashing_head.layers.1.weight'].shape[0]
+        dinov2_map = {384: 'vit_small_patch14_dinov2.lvd142m',
+                      768: 'vit_base_patch14_dinov2.lvd142m',
+                      1024: 'vit_large_patch14_dinov2.lvd142m'}
+        model_name = dinov2_map.get(embed_dim, 'vit_small_patch14_dinov2.lvd142m')
+        model = DINOv3Hashing(model_name=model_name, pretrained=False,
+                              hash_bit=hash_bit, hidden_dim=hidden_dim)
+    else:
+        model_type = 'vit'
+        hash_bit = state['hashing_head.3.weight'].shape[0]
+        pos_len = state['backbone.pos_embed'].shape[1]
+        model_name = 'vit_base_patch32_224' if pos_len == 50 else 'vit_base_patch16_224'
+        model = ViT_Hashing(model_name=model_name, pretrained=False, hash_bit=hash_bit)
+    
+    model.load_state_dict(state)
     model = model.to(device)
     model.eval()
     
-    print(f"  Model: {model_name}")
+    print(f"  Model: {model_name} ({model_type})")
     print(f"  Hash bit: {hash_bit}")
     if 'metrics' in checkpoint:
         print(f"  Training mAP: {checkpoint['metrics'].get('mAP', 'N/A')}")
@@ -556,9 +569,6 @@ def main():
     # Model
     parser.add_argument('--checkpoint', type=str, default='./checkpoints/best_model.pth',
                        help='Path to model checkpoint')
-    parser.add_argument('--hash-bit', type=int, default=64, help='Hash bit length')
-    parser.add_argument('--patch-size', type=int, default=32, choices=[16, 32],
-                       help='ViT patch size')
     
     # Data
     parser.add_argument('--data-dir', type=str, default='./data/archive/Dataset',

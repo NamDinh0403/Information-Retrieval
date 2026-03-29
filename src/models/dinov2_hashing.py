@@ -95,8 +95,8 @@ class DINOv3Hashing(nn.Module):
         hash_bit: int = 64,
         freeze_backbone: bool = False,
         use_gram_anchoring: bool = False,
-        hidden_dim: int = 1024,
-        dropout: float = 0.5
+        hidden_dim: int = None,
+        dropout: float = 0.3
     ):
         super().__init__()
         
@@ -113,6 +113,14 @@ class DINOv3Hashing(nn.Module):
         )
         
         embed_dim = self.backbone.num_features
+        
+        # Auto-scale hidden_dim: avoid explosion for small embed_dim (e.g. 384)
+        if hidden_dim is None:
+            hidden_dim = min(embed_dim, 512)
+        
+        # LayerNorm to stabilize DINOv2 features BEFORE hashing head
+        # DINOv2 features have large magnitude → overflow in float16 AMP
+        self.feature_norm = nn.LayerNorm(embed_dim)
         
         # Hashing head
         self.hashing_head = HashingHead(
@@ -160,6 +168,9 @@ class DINOv3Hashing(nn.Module):
         """
         # Extract features từ backbone
         features = self.backbone(x)  # [B, embed_dim]
+        
+        # Normalize features to prevent float16 overflow in AMP
+        features = self.feature_norm(features)
         
         # Gram Anchoring (if enabled)
         if self.use_gram_anchoring and self.training:
