@@ -186,7 +186,7 @@ def validate(
     query_loader: torch.utils.data.DataLoader,
     db_loader: torch.utils.data.DataLoader,
     device: torch.device,
-    max_samples: int = 500,  # Limit for faster validation
+    max_samples: int = 2100,  # Use full query set for stable mAP signal
 ) -> dict:
     """Quick validation using a subset."""
     model.eval()
@@ -247,31 +247,38 @@ def train(args):
     print(f"\n[Device] Using: {device}")
     
     # Hyperparameters
-    num_classes = 21  # Standard: 21 most frequent labels
+    num_classes = 81 if args.use_81_labels else 21
     hash_bit = args.hash_bit
     batch_size = args.batch_size
     epochs = args.epochs
     lr_backbone = args.lr_backbone
     lr_head = args.lr_head
+    warmup_epochs = args.warmup_epochs
+    max_train = args.max_train_samples if args.max_train_samples > 0 else None  # 0 = unlimited
     
     print(f"\n[Hyperparameters]")
     print(f"  Model: {args.model}")
     print(f"  Hash bits: {hash_bit}")
+    print(f"  Classes: {num_classes} ({'81 concepts' if args.use_81_labels else '21 most frequent'})")
     print(f"  Batch size: {batch_size}")
-    print(f"  Epochs: {epochs}")
+    print(f"  Epochs: {epochs} (warmup: {warmup_epochs})")
+    print(f"  Max train samples: {max_train if max_train else 'unlimited'}")
     print(f"  LR backbone: {lr_backbone}")
     print(f"  LR head: {lr_head}")
     print(f"  Loss: {args.loss}")
     
     # Data
     print("\n[Loading Data]")
+    train_per_class = 50 if args.quick else args.train_per_class
     train_loader, query_loader, db_loader = get_nuswide_preprocessed_loaders(
         data_dir=args.data_dir,
         batch_size=batch_size,
         num_workers=args.num_workers,
-        train_per_class=50 if args.quick else 500,
+        train_per_class=train_per_class,
+        max_train_samples=1000 if args.quick else max_train,
+        use_81_labels=args.use_81_labels,
     )
-    label_names = NUSWIDE_21_LABELS
+    label_names = NUSWIDE_21_LABELS  # For display only
     
     # Model
     model = build_model(
@@ -303,13 +310,18 @@ def train(args):
         lr_backbone = lr_backbone * 0.1
         print(f"  Backbone LR reduced to {lr_backbone:.2e} (0.1× of base)")
 
-    # Loss
+    # Loss - disable center loss for transfer learning (hash centers are randomly initialized)
+    # Only use pairwise similarity + quantization loss
+    lambda_c = 0.0 if getattr(args, 'finetune_from', None) else args.lambda_c
+    if lambda_c != args.lambda_c:
+        print(f"  [Transfer] Center loss disabled (lambda_c: {args.lambda_c} -> 0.0)")
+    
     criterion = get_multilabel_loss(
         loss_type=args.loss,
         hash_bit=hash_bit,
         num_classes=num_classes,
         lambda_q=args.lambda_q,
-        lambda_c=args.lambda_c,
+        lambda_c=lambda_c,
     )
     
     # Optimizer (different LR for backbone and head)
@@ -327,8 +339,29 @@ def train(args):
         {'params': head_params, 'lr': lr_head}
     ], weight_decay=1e-4)
     
-    # Scheduler
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    # Scheduler with warmup
+    # During warmup: freeze backbone, only train head
+    # After warmup: unfreeze and use cosine annealing
+    def lr_lambda_backbone(epoch):
+        if epoch < warmup_epochs:
+            return 0.0  # Freeze backbone during warmup
+        # Linear warmup from 0.1x to 1x over 2 epochs after warmup
+        ramp_epochs = 2
+        if epoch < warmup_epochs + ramp_epochs:
+            return 0.1 + 0.9 * (epoch - warmup_epochs) / ramp_epochs
+        return 1.0
+    
+    def lr_lambda_head(epoch):
+        # Head always active, with cosine decay after warmup
+        if epoch < warmup_epochs:
+            return 1.0
+        progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+        return 0.5 * (1 + np.cos(np.pi * progress))
+    
+    scheduler = optim.lr_scheduler.LambdaLR(
+        optimizer, 
+        lr_lambda=[lr_lambda_backbone, lr_lambda_head]
+    )
     
     # Training loop
     best_mAP = 0.0
@@ -341,6 +374,13 @@ def train(args):
     
     for epoch in range(1, epochs + 1):
         start_time = time.time()
+        
+        # Show phase
+        if epoch <= warmup_epochs:
+            phase = f"WARMUP {epoch}/{warmup_epochs} (backbone frozen)"
+        else:
+            phase = f"FINETUNE {epoch - warmup_epochs}/{epochs - warmup_epochs}"
+        print(f"\n[{phase}]")
         
         # Train
         train_loss = train_one_epoch(
@@ -436,14 +476,24 @@ def main():
     parser.add_argument('--lr-head', type=float, default=1e-4)
     parser.add_argument('--grad-accumulation', type=int, default=4)
     parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--warmup-epochs', type=int, default=3,
+                        help='Epochs to freeze backbone and only train head')
+    
+    # Data sampling
+    parser.add_argument('--train-per-class', type=int, default=500,
+                        help='Min samples per class for training')
+    parser.add_argument('--max-train-samples', type=int, default=50000,
+                        help='Max total training samples (default 50k, set 0 for unlimited)')
+    parser.add_argument('--use-81-labels', action='store_true',
+                        help='Use all 81 NUS-WIDE concepts instead of 21 most frequent')
     
     # Loss
     parser.add_argument('--loss', type=str, choices=['csq', 'dch', 'hashnet'],
                         default='csq', help='Loss function')
     parser.add_argument('--lambda-q', type=float, default=0.01,
                         help='Quantization loss weight')
-    parser.add_argument('--lambda-c', type=float, default=1.0,
-                        help='Center loss weight (CSQ only)')
+    parser.add_argument('--lambda-c', type=float, default=0.0,
+                        help='Center loss weight (CSQ). Default 0: disabled for multi-label NUS-WIDE')
     
     # Output
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints')

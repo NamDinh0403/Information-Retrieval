@@ -423,14 +423,23 @@ class NUSWIDEPreprocessedDataset(Dataset):
     Standard hashing protocol (same as CSQ, HashNet papers):
         Query    : 2,100 images  — test_img.txt / test_label_onehot.txt
         Database : 193,734 images — database_img.txt / database_label_onehot.txt
-        Train    : 10,500 images randomly sampled from database
-                   (500 per class × 21 classes, seed-reproducible)
+        Train    : Configurable - default 10,500 (500/class × 21)
+                   Can increase to 50k+ for better training
+
+    Supports both 21-label and 81-label modes.
     """
 
-    _SPLIT_FILES = {
+    _SPLIT_FILES_21 = {
         'query':    ('test_img.txt',     'test_label_onehot.txt'),
         'database': ('database_img.txt', 'database_label_onehot.txt'),
         'train':    ('database_img.txt', 'database_label_onehot.txt'),
+    }
+
+    # 81-label files (if available)
+    _SPLIT_FILES_81 = {
+        'query':    ('test_img.txt',     'test_label_onehot_81.txt'),
+        'database': ('database_img.txt', 'database_label_onehot_81.txt'),
+        'train':    ('database_img.txt', 'database_label_onehot_81.txt'),
     }
 
     def __init__(
@@ -438,6 +447,8 @@ class NUSWIDEPreprocessedDataset(Dataset):
         data_dir: str,
         split: str = 'query',           # 'query' | 'database' | 'train'
         train_per_class: int = 500,     # images per class for train split
+        max_train_samples: int = None,  # Hard cap on training samples (e.g., 50000)
+        use_81_labels: bool = False,    # Use all 81 concepts instead of 21
         seed: int = 42,
         transform=None,
     ):
@@ -446,11 +457,22 @@ class NUSWIDEPreprocessedDataset(Dataset):
 
         self.data_dir = data_dir
         self.split = split
+        self.use_81_labels = use_81_labels
+        self.num_classes = 81 if use_81_labels else 21
         self.transform = transform or self._default_transform(split)
 
-        img_file, lbl_file = self._SPLIT_FILES[split]
-        img_path  = os.path.join(data_dir, img_file)
-        lbl_path  = os.path.join(data_dir, lbl_file)
+        # Select file set based on label mode
+        split_files = self._SPLIT_FILES_81 if use_81_labels else self._SPLIT_FILES_21
+        img_file, lbl_file = split_files[split]
+        img_path = os.path.join(data_dir, img_file)
+        lbl_path = os.path.join(data_dir, lbl_file)
+
+        # Fallback: if 81-label file doesn't exist, try 21-label
+        if use_81_labels and not os.path.exists(lbl_path):
+            print(f"[NUS-WIDE] 81-label file not found, falling back to 21 labels")
+            lbl_path = os.path.join(data_dir, self._SPLIT_FILES_21[split][1])
+            self.use_81_labels = False
+            self.num_classes = 21
 
         if not os.path.exists(img_path):
             raise FileNotFoundError(
@@ -462,24 +484,42 @@ class NUSWIDEPreprocessedDataset(Dataset):
         with open(img_path, 'r') as f:
             all_img = [os.path.join(data_dir, line.strip()) for line in f]
 
-        # Load one-hot labels  (space-separated per line)
-        all_lbl = np.loadtxt(lbl_path, dtype=np.float32)  # [N, 21]
+        # Load one-hot labels (space-separated per line)
+        all_lbl = np.loadtxt(lbl_path, dtype=np.float32)  # [N, num_classes]
 
         if split == 'train':
-            # Sample 500 images per class (reproducible)
+            # Sample images for training
             rng = np.random.default_rng(seed)
             keep = set()
+            
+            # First pass: ensure each class has train_per_class samples
             for c in range(all_lbl.shape[1]):
                 pos = np.where(all_lbl[:, c] == 1)[0]
                 chosen = rng.choice(pos, size=min(train_per_class, len(pos)), replace=False)
                 keep.update(chosen.tolist())
+            
+            # If max_train_samples specified and we need more samples
+            if max_train_samples and len(keep) < max_train_samples:
+                # Add more samples randomly from remaining pool
+                remaining = set(range(len(all_img))) - keep
+                # Filter to only images with at least 1 positive label
+                remaining = [i for i in remaining if all_lbl[i].sum() > 0]
+                extra_needed = min(max_train_samples - len(keep), len(remaining))
+                if extra_needed > 0:
+                    extra = rng.choice(remaining, size=extra_needed, replace=False)
+                    keep.update(extra.tolist())
+            
+            # If max_train_samples specified and we have too many, subsample
+            if max_train_samples and len(keep) > max_train_samples:
+                keep = set(rng.choice(list(keep), size=max_train_samples, replace=False))
+            
             keep = sorted(keep)
             all_img = [all_img[i] for i in keep]
             all_lbl = all_lbl[keep]
 
         self.image_paths = all_img
         self.labels = all_lbl
-        print(f"[NUS-WIDE] split='{split}' — {len(self)} images, 21 labels")
+        print(f"[NUS-WIDE] split='{split}' — {len(self)} images, {self.num_classes} labels")
 
     @staticmethod
     def _default_transform(split: str):
@@ -518,6 +558,8 @@ def get_nuswide_preprocessed_loaders(
     batch_size: int = 32,
     num_workers: int = 4,
     train_per_class: int = 500,
+    max_train_samples: int = None,  # Hard cap on training samples
+    use_81_labels: bool = False,    # Use all 81 concepts
     seed: int = 42,
 ) -> Tuple['DataLoader', 'DataLoader', 'DataLoader']:
     """
@@ -525,13 +567,24 @@ def get_nuswide_preprocessed_loaders(
     NUS-WIDE hashing benchmark using the pre-split archive files.
 
     Protocol matches CSQ / HashNet papers:
-        Train   : ~10,500 imgs  (500/class × 21 classes, from database)
+        Train   : Configurable (default ~10,500, can increase to 50k+)
         Query   :  2,100  imgs  (test_img.txt)
         Database: 193,734 imgs  (database_img.txt)
+    
+    Args:
+        train_per_class: Min samples per class (default 500)
+        max_train_samples: Hard cap on total training samples (e.g., 50000)
+        use_81_labels: Use all 81 NUS-WIDE concepts instead of 21
     """
-    train_ds = NUSWIDEPreprocessedDataset(data_dir, 'train',  train_per_class, seed)
-    query_ds = NUSWIDEPreprocessedDataset(data_dir, 'query',  train_per_class, seed)
-    db_ds    = NUSWIDEPreprocessedDataset(data_dir, 'database', train_per_class, seed)
+    train_ds = NUSWIDEPreprocessedDataset(
+        data_dir, 'train', train_per_class, max_train_samples, use_81_labels, seed
+    )
+    query_ds = NUSWIDEPreprocessedDataset(
+        data_dir, 'query', train_per_class, None, use_81_labels, seed
+    )
+    db_ds = NUSWIDEPreprocessedDataset(
+        data_dir, 'database', train_per_class, None, use_81_labels, seed
+    )
 
     def make_loader(ds, shuffle):
         return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,

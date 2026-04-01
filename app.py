@@ -2,6 +2,8 @@
 Streamlit Web App — Image Retrieval with Deep Hashing
 =====================================================
 
+Supports both NWPU-RESISC45 and NUS-WIDE datasets.
+
 Run:
     streamlit run app.py
 
@@ -28,10 +30,44 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.models.vit_hashing import ViT_Hashing
 from src.models.dinov2_hashing import DINOv3Hashing
 
-# ── defaults ─────────────────────────────────────────────────
-DEFAULT_CHECKPOINT = "./checkpoints/best_model_nwpu_vit.pth"
-DEFAULT_DATABASE   = "./database/nwpu_vectors.npz"
-DATASET_ROOT       = "./data/archive/Dataset"
+# ── Dataset configurations ───────────────────────────────────
+DATASET_CONFIGS = {
+    "NWPU-RESISC45": {
+        "checkpoints": [
+            "./checkpoints/best_model_nwpu_vit.pth",
+            "./checkpoints/best_model_nwpu_vit_64bit.pth",
+        ],
+        "databases": [
+            "./database/nwpu_vectors.npz",
+            "./database/nwpu_64bit.npz",
+        ],
+        "data_root": "./data/archive/Dataset",
+        "description": "45-class satellite imagery (single-label)",
+    },
+    "NUS-WIDE (128-bit)": {
+        "checkpoints": [
+            "./checkpoints/best_model_nuswide_vit_128bit.pth",
+        ],
+        "databases": [
+            "./database/nuswide_128bit.npz",
+        ],
+        "data_root": "./src/data/archive/NUS-WIDE",
+        "description": "21-concept web images (multi-label)",
+    },
+    "NUS-WIDE (64-bit)": {
+        "checkpoints": [
+            "./checkpoints/best_model_nuswide_vit_64bit.pth",
+        ],
+        "databases": [
+            "./database/nuswide_64bit.npz",
+        ],
+        "data_root": "./src/data/archive/NUS-WIDE",
+        "description": "21-concept web images (multi-label)",
+    },
+}
+
+# Defaults
+DEFAULT_DATASET = "NWPU-RESISC45"
 
 # ═════════════════════════════════════════════════════════════
 # HELPERS
@@ -102,6 +138,8 @@ def load_database(db_path: str):
 def scan_dataset_classes(dataset_root: str):
     """Return {class_name: [image_paths]} from train+test."""
     classes = {}
+    
+    # Try NWPU format first: train/train/class, test/test/class
     for split in ["train/train", "test/test"]:
         root = os.path.join(dataset_root, split)
         if not os.path.isdir(root):
@@ -112,6 +150,29 @@ def scan_dataset_classes(dataset_root: str):
                 continue
             imgs = sorted(glob.glob(os.path.join(cls_dir, "*.*")))
             classes.setdefault(cls, []).extend(imgs)
+    
+    # If found NWPU structure, return
+    if classes:
+        return classes
+    
+    # Try NUS-WIDE format: images/ folder with flat images
+    images_dir = os.path.join(dataset_root, "images")
+    if os.path.isdir(images_dir):
+        # For NUS-WIDE, we just list all images without class grouping
+        imgs = sorted(glob.glob(os.path.join(images_dir, "*.*")))
+        if imgs:
+            classes["all_images"] = imgs
+            return classes
+    
+    # Fallback: try dataset_root directly
+    if os.path.isdir(dataset_root):
+        for item in sorted(os.listdir(dataset_root)):
+            item_path = os.path.join(dataset_root, item)
+            if os.path.isdir(item_path):
+                imgs = sorted(glob.glob(os.path.join(item_path, "*.*")))
+                if imgs:
+                    classes.setdefault(item, []).extend(imgs)
+    
     return classes
 
 
@@ -170,20 +231,66 @@ def main():
 
     # ── sidebar ──────────────────────────────────────────────
     with st.sidebar:
+        st.header("🗂️ Dataset Selection")
+        
+        # Find available datasets (those with existing checkpoints)
+        available_datasets = []
+        for name, config in DATASET_CONFIGS.items():
+            for ckpt in config["checkpoints"]:
+                if os.path.exists(ckpt):
+                    available_datasets.append(name)
+                    break
+        
+        if not available_datasets:
+            st.error("No trained models found! Train a model first.")
+            st.stop()
+        
+        # Dataset selector
+        selected_dataset = st.selectbox(
+            "Choose dataset",
+            available_datasets,
+            index=0,
+            help="Auto-loads corresponding model and database"
+        )
+        
+        config = DATASET_CONFIGS[selected_dataset]
+        st.caption(config["description"])
+        
+        # Find first available checkpoint and database
+        ckpt_path = None
+        for ckpt in config["checkpoints"]:
+            if os.path.exists(ckpt):
+                ckpt_path = ckpt
+                break
+        
+        db_path = None
+        for db in config["databases"]:
+            if os.path.exists(db):
+                db_path = db
+                break
+        
+        # Show paths (editable for advanced users)
+        st.divider()
         st.header("⚙️ Settings")
-
-        ckpt_path = st.text_input("Checkpoint", value=DEFAULT_CHECKPOINT)
-        db_path   = st.text_input("Database (.npz)", value=DEFAULT_DATABASE)
-        top_k     = st.slider("Top-K results", 5, 100, 20, step=5)
+        
+        with st.expander("Advanced: Custom paths", expanded=False):
+            ckpt_path = st.text_input("Checkpoint", value=ckpt_path or "")
+            db_path = st.text_input("Database (.npz)", value=db_path or "")
+        
+        top_k = st.slider("Top-K results", 5, 100, 20, step=5)
 
         st.divider()
         st.header("📊 Query mode")
         mode = st.radio("Choose", ["Upload image", "Random from dataset",
                                     "Browse by class"], label_visibility="collapsed")
+    
+    # Get dataset root for browsing
+    DATASET_ROOT = config["data_root"]
 
     # ── load model ───────────────────────────────────────────
-    if not os.path.exists(ckpt_path):
+    if not ckpt_path or not os.path.exists(ckpt_path):
         st.error(f"Checkpoint not found: `{ckpt_path}`")
+        st.info("Train a model first, e.g.:\n```bash\npython experiments/train_nuswide.py --hash-bit 64\n```")
         st.stop()
 
     model, model_info = load_model(ckpt_path)
@@ -193,24 +300,34 @@ def main():
     with st.sidebar:
         st.divider()
         st.markdown("**Model info**")
+        st.write(f"Dataset: `{selected_dataset}`")
         st.write(f"Type: `{model_info['model_type']}` ({model_info['model_name']})")
         st.write(f"Hash bits: `{model_info['hash_bit']}`")
         st.write(f"Epoch: `{model_info['epoch']}`  ·  Val mAP: `{model_info['mAP']}`")
         st.write(f"Device: `{device}`")
 
     # ── load database ────────────────────────────────────────
-    if not os.path.exists(db_path):
+    if not db_path or not os.path.exists(db_path):
         st.warning(f"Database not found: `{db_path}`")
-        st.info("Build it first:\n```\npython scripts/build_vector_db.py build "
-                "--checkpoint ./checkpoints/best_model_nwpu_vit.pth --full "
-                "--output ./database/nwpu_vectors.npz\n```")
+        
+        # Show appropriate build command based on dataset
+        if "NUS-WIDE" in selected_dataset:
+            bits = "128" if "128" in selected_dataset else "64"
+            st.info(f"Build it first:\n```bash\npython scripts/build_nuswide_db.py \\\n"
+                   f"    --checkpoint {ckpt_path}\n```")
+        else:
+            st.info("Build it first:\n```bash\npython scripts/build_vector_db.py build "
+                   f"--checkpoint {ckpt_path} --full "
+                   "--output ./database/nwpu_vectors.npz\n```")
 
-        # offer on-the-fly build
-        st.divider()
-        st.subheader("Or build now (may be slow on CPU)")
-        if st.button("🔨 Build database from full dataset"):
-            _build_database_ui(ckpt_path, db_path, model, model_info, device)
-            st.rerun()
+        # offer on-the-fly build for NWPU only (NUS-WIDE needs preprocessed data)
+        if "NUS-WIDE" not in selected_dataset:
+            st.divider()
+            st.subheader("Or build now (may be slow on CPU)")
+            if st.button("🔨 Build database from full dataset"):
+                _build_database_ui(ckpt_path, db_path or f"./database/{selected_dataset.lower().replace(' ', '_')}.npz", 
+                                   model, model_info, device, DATASET_ROOT)
+                st.rerun()
         st.stop()
 
     db = load_database(db_path)
@@ -342,7 +459,7 @@ def main():
 # ON-THE-FLY DATABASE BUILD
 # ═════════════════════════════════════════════════════════════
 
-def _build_database_ui(ckpt_path, db_path, model, model_info, device):
+def _build_database_ui(ckpt_path, db_path, model, model_info, device, dataset_root):
     """Build the vector database with a progress bar inside Streamlit."""
     from torch.utils.data import DataLoader, ConcatDataset
     from torchvision.datasets import ImageFolder
@@ -350,8 +467,8 @@ def _build_database_ui(ckpt_path, db_path, model, model_info, device):
 
     transform = get_transform()
     data_dirs = [
-        os.path.join(DATASET_ROOT, "train", "train"),
-        os.path.join(DATASET_ROOT, "test", "test"),
+        os.path.join(dataset_root, "train", "train"),
+        os.path.join(dataset_root, "test", "test"),
     ]
 
     datasets = []
